@@ -1,24 +1,24 @@
 import os
 import json
+import shutil
+import yaml
 import torch
 from datetime import datetime
 from ultralytics import YOLO
 from export import export_model
-
 import argparse
 
 PROGRESS_FILE = os.path.abspath('training_progress.json')
+DATA_YAML = os.path.abspath('assets/newds/data.yaml')
 
-
-def get_increment_epochs(current_total):
-    parser = argparse.ArgumentParser(description='Incremental YOLOv9 Training for EMBER')
+def get_cli_args():
+    parser = argparse.ArgumentParser(description='EMBER YOLOv9 Training Pipeline')
     parser.add_argument('--epochs', type=int, default=None, help='Number of epochs to train in this batch')
+    parser.add_argument('--fresh', action='store_true', help='Force start fresh training from base yolov9t.pt')
+    parser.add_argument('--batch', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--imgsz', type=int, default=640, help='Image resolution')
     args, _ = parser.parse_known_args()
-    if args.epochs is not None:
-        return args.epochs
-    # 5 epochs for this run (from 5 -> 10 total), then 10 epochs for subsequent runs
-    return 5 if current_total < 10 else 10
-
+    return args
 
 def load_training_progress():
     if os.path.exists(PROGRESS_FILE):
@@ -28,25 +28,10 @@ def load_training_progress():
         except Exception:
             pass
 
-    # Default if no progress file exists yet:
-    # Check if there is an existing results.csv to infer initial epochs
-    initial_epochs = 0
-    results_csv = 'runs/detect/train/results.csv'
-    if os.path.exists(results_csv):
-        try:
-            with open(results_csv, 'r') as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
-                # subtract 1 for header line
-                if len(lines) > 1:
-                    initial_epochs = len(lines) - 1
-        except Exception:
-            pass
-
     return {
-        'total_cumulative_epochs': initial_epochs,
+        'total_cumulative_epochs': 0,
         'history': []
     }
-
 
 def save_training_progress(total_epochs, run_info):
     progress = load_training_progress()
@@ -55,42 +40,79 @@ def save_training_progress(total_epochs, run_info):
     with open(PROGRESS_FILE, 'w') as f:
         json.dump(progress, f, indent=2)
 
-
 if __name__ == '__main__':
-    progress = load_training_progress()
-    current_total_epochs = progress.get('total_cumulative_epochs', 0)
-    increment_epochs = get_increment_epochs(current_total_epochs)
-    target_total_epochs = current_total_epochs + increment_epochs
+    args = get_cli_args()
+    
+    # Load dataset config
+    with open(DATA_YAML, 'r') as f:
+        data_cfg = yaml.safe_load(f)
+    num_classes = data_cfg.get('nc', 2)
+    class_names = data_cfg.get('names', ['Vape', 'Cigarette'])
 
-    print("=" * 60)
-    print("EMBER YOLOv9 Incremental Training")
-    print(f"Previously trained cumulative epochs: {current_total_epochs}")
-    print(f"Training for +{increment_epochs} more epochs (Cumulative Target: {target_total_epochs})")
-    print("=" * 60)
-
-    # If previous best.pt exists, fine-tune on top of it, otherwise use pretrained yolov9t.pt
     best_weights = os.path.abspath('runs/detect/train/weights/best.pt')
-    if os.path.exists(best_weights):
-        base_model = best_weights
-        print(f"Continuing training from existing weights: {base_model}")
-    else:
-        base_model = 'yolov9t.pt'
-        print(f"Starting fresh training with base model: {base_model}")
+    
+    # Check if we need a fresh start (flag or class count mismatch)
+    need_fresh = args.fresh
+    if os.path.exists(best_weights) and not need_fresh:
+        try:
+            temp_model = YOLO(best_weights)
+            weights_nc = len(temp_model.names)
+            if weights_nc != num_classes:
+                print(f"⚠️ Model weights class count ({weights_nc}) != dataset class count ({num_classes}).")
+                print("Automatically initiating fresh training from base yolov9t.pt...")
+                need_fresh = True
+        except Exception:
+            need_fresh = True
 
-    # Determine optimal compute device (CUDA GPU if available, else CPU)
+    if need_fresh:
+        # Archive previous 4-class weights/runs if present
+        train_dir = os.path.abspath('runs/detect/train')
+        if os.path.exists(train_dir):
+            archive_dir = os.path.abspath('runs/detect/train_legacy_4class')
+            if not os.path.exists(archive_dir):
+                print(f"Archiving previous training run to {archive_dir}...")
+                shutil.copytree(train_dir, archive_dir)
+            shutil.rmtree(train_dir)
+        
+        # Reset progress file
+        with open(PROGRESS_FILE, 'w') as f:
+            json.dump({
+                'model_version': '2-class-consolidated',
+                'classes': class_names,
+                'total_cumulative_epochs': 0,
+                'history': []
+            }, f, indent=2)
+        
+        base_model = 'yolov9t.pt'
+        current_total_epochs = 0
+        epochs_to_train = args.epochs if args.epochs is not None else 20
+    else:
+        progress = load_training_progress()
+        current_total_epochs = progress.get('total_cumulative_epochs', 0)
+        epochs_to_train = args.epochs if args.epochs is not None else 10
+        base_model = best_weights if os.path.exists(best_weights) else 'yolov9t.pt'
+
+    target_total_epochs = current_total_epochs + epochs_to_train
+
+    print("=" * 65)
+    print("EMBER YOLOv9 Training Pipeline")
+    print(f"Target Classes: {class_names} (nc={num_classes})")
+    print(f"Base Weights:   {base_model}")
+    print(f"Prior Epochs:   {current_total_epochs}")
+    print(f"Target Epochs:  +{epochs_to_train} (Total: {target_total_epochs})")
+    print("=" * 65)
+
     device = 0 if torch.cuda.is_available() else 'cpu'
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print(f"Compute Device: {device_name} (device={device})")
 
     model = YOLO(base_model)
-    data_yaml_path = os.path.abspath('assets/newds/data.yaml')
-    print(f"Dataset configuration: {data_yaml_path}")
-    
-    # Train for incremental epochs
+
     results = model.train(
-        data=data_yaml_path,
-        epochs=increment_epochs,
-        imgsz=640,
+        data=DATA_YAML,
+        epochs=epochs_to_train,
+        imgsz=args.imgsz,
+        batch=args.batch,
         name='train',
         exist_ok=True,
         device=device,
@@ -99,25 +121,21 @@ if __name__ == '__main__':
         cos_lr=True,
     )
 
-    # Record the newly completed progress
     run_record = {
         'timestamp': datetime.now().isoformat(),
         'previous_total_epochs': current_total_epochs,
-        'added_epochs': increment_epochs,
+        'added_epochs': epochs_to_train,
         'new_total_epochs': target_total_epochs,
         'weights_file': best_weights,
+        'classes': class_names,
     }
     save_training_progress(target_total_epochs, run_record)
 
-    next_increment = 10
-    print("\n" + "=" * 60)
-    print(f"✅ Incremental training complete! Total cumulative epochs: {target_total_epochs}")
-    print(f"Progress recorded in: {PROGRESS_FILE}")
-    print(f"Next run will train +{next_increment} epochs (Target: {target_total_epochs + next_increment})")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print(f"✅ Training run complete! Total cumulative epochs: {target_total_epochs}")
+    print("=" * 65)
 
-    # Export trained model from best weights to Flutter asset
-    print(f"\nExporting trained model from {best_weights} to Flutter asset...")
+    # Export trained model to Flutter asset
+    print(f"\nExporting newly trained model from {best_weights} to Flutter assets...")
     export_path = export_model(model_path=best_weights)
     print(f"Model exported to {export_path}")
-    print(f"Batch (+{increment_epochs} epochs) training and export complete!")
