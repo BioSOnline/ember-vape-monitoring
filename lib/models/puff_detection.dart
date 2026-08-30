@@ -34,13 +34,21 @@ class PuffDetection {
 
   bool get isPuffEvent => classId >= 0 && classId <= 3 && isNearMouth && confidence >= 0.35;
 
+  bool get isVape => classId == 0 || classId == 2;
+  bool get isCigarette => classId == 1 || classId == 3;
+
   String get className {
     switch (classId) {
-      case 0: return 'Vape';
-      case 1: return 'Cigarette';
-      case 2: return 'IQOS';
-      case 3: return 'Trubka';
-      default: return 'Unknown';
+      case 0:
+        return 'Vape';
+      case 1:
+        return 'Cigarette';
+      case 2:
+        return 'Vape'; // Consolidated IQOS -> Vape
+      case 3:
+        return 'Trubka';
+      default:
+        return 'Unknown';
     }
   }
 
