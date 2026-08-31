@@ -1,6 +1,5 @@
 import 'dart:isolate';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 import 'package:ember/core/utils/logger.dart';
@@ -9,29 +8,26 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 
 /// Top-level helper function for background isolate image packing
 Float32List _packImageToFloat32(img.Image image, int targetWidth, int targetHeight, bool isNHWC) {
-  final resized = img.copyResize(image, width: targetWidth, height: targetHeight);
+  final resized = (image.width == targetWidth && image.height == targetHeight)
+      ? image
+      : img.copyResize(image, width: targetWidth, height: targetHeight, interpolation: img.Interpolation.nearest);
   final inputBytes = Float32List(1 * targetHeight * targetWidth * 3);
 
   if (isNHWC) {
     int idx = 0;
-    for (var y = 0; y < targetHeight; y++) {
-      for (var x = 0; x < targetWidth; x++) {
-        final pixel = resized.getPixelSafe(x, y);
-        inputBytes[idx++] = pixel.r / 255.0;
-        inputBytes[idx++] = pixel.g / 255.0;
-        inputBytes[idx++] = pixel.b / 255.0;
-      }
+    for (final pixel in resized) {
+      inputBytes[idx++] = pixel.r / 255.0;
+      inputBytes[idx++] = pixel.g / 255.0;
+      inputBytes[idx++] = pixel.b / 255.0;
     }
   } else {
     final int planeSize = targetHeight * targetWidth;
-    for (var y = 0; y < targetHeight; y++) {
-      for (var x = 0; x < targetWidth; x++) {
-        final pixel = resized.getPixelSafe(x, y);
-        final int idx = y * targetWidth + x;
-        inputBytes[0 * planeSize + idx] = pixel.r / 255.0;
-        inputBytes[1 * planeSize + idx] = pixel.g / 255.0;
-        inputBytes[2 * planeSize + idx] = pixel.b / 255.0;
-      }
+    int idx = 0;
+    for (final pixel in resized) {
+      inputBytes[0 * planeSize + idx] = pixel.r / 255.0;
+      inputBytes[1 * planeSize + idx] = pixel.g / 255.0;
+      inputBytes[2 * planeSize + idx] = pixel.b / 255.0;
+      idx++;
     }
   }
   return inputBytes;
@@ -70,6 +66,7 @@ img.Image _convertYUV420(int width, int height, Uint8List yBuffer, Uint8List uBu
 /// Native (Android/iOS/Desktop) implementation using TFLite with multi-threading & isolates.
 class PuffDetectionServiceImpl {
   Interpreter? _interpreter;
+  IsolateInterpreter? _isolateInterpreter;
   bool _isInitialized = false;
   List<PuffDetection> _previousDetections = [];
 
@@ -82,6 +79,12 @@ class PuffDetectionServiceImpl {
         'assets/models/puff_detection.tflite',
         options: options,
       );
+      try {
+        _isolateInterpreter = await IsolateInterpreter.create(address: _interpreter!.address);
+        Logger.info('IsolateInterpreter initialized for non-blocking background inference');
+      } catch (e) {
+        Logger.warning('IsolateInterpreter fallback to main thread interpreter: $e');
+      }
       _isInitialized = true;
 
       final inputTensor = _interpreter!.getInputTensor(0);
@@ -117,7 +120,7 @@ class PuffDetectionServiceImpl {
 
       if (inputBytes == null) return [];
 
-      return _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
+      return await _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
     } catch (e) {
       Logger.error('Error during JPEG inference: $e');
       return [];
@@ -130,7 +133,6 @@ class PuffDetectionServiceImpl {
       return [];
     }
 
-    final stopwatch = Stopwatch()..start();
     try {
       img.Image? convertedImage;
       if (frame.format.group == ImageFormatGroup.yuv420) {
@@ -191,20 +193,20 @@ class PuffDetectionServiceImpl {
         return _packImageToFloat32(image, inputWidth, inputHeight, isNHWC);
       });
 
-      return _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
+      return await _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
     } catch (e) {
       Logger.error('Error during image inference: $e');
       return [];
     }
   }
 
-  List<PuffDetection> _runInferenceOnPackedBytes(
+  Future<List<PuffDetection>> _runInferenceOnPackedBytes(
     Float32List inputBytes,
     int inputWidth,
     int inputHeight,
     bool isNHWC,
     Stopwatch stopwatch,
-  ) {
+  ) async {
     try {
       final input = isNHWC
           ? inputBytes.reshape([1, inputHeight, inputWidth, 3])
@@ -219,7 +221,11 @@ class PuffDetectionServiceImpl {
           1, (_) => List.generate(outputShape[1], (_) => List.filled(outputShape[2], 0.0)));
 
       final inferenceStart = stopwatch.elapsedMilliseconds;
-      _interpreter!.run(input, outputBuffer);
+      if (_isolateInterpreter != null) {
+        await _isolateInterpreter!.run(input, outputBuffer);
+      } else {
+        _interpreter!.run(input, outputBuffer);
+      }
       final inferenceTime = stopwatch.elapsedMilliseconds - inferenceStart;
 
       List<PuffDetection> rawCandidates = [];
@@ -240,14 +246,6 @@ class PuffDetectionServiceImpl {
           if (conf > bestConf) {
             bestConf = conf;
             bestClass = c - 4;
-          }
-        }
-
-        if (numAttributes == 6) {
-          final confVal = isTransposed ? outputBuffer[0][4][i] : outputBuffer[0][i][4];
-          if (confVal > 0.0) {
-            bestConf = confVal;
-            bestClass = (isTransposed ? outputBuffer[0][5][i] : outputBuffer[0][i][5]).round();
           }
         }
 
@@ -379,6 +377,7 @@ class PuffDetectionServiceImpl {
   }
 
   void dispose() {
+    _isolateInterpreter?.close();
     _interpreter?.close();
     _isInitialized = false;
     Logger.info('Puff detection service disposed');
