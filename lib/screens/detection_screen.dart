@@ -33,6 +33,9 @@ class _DetectionScreenState extends State<DetectionScreen> {
   bool _hasCameraPermission = true;
   String _cameraError = '';
   bool _isProcessingFrame = false;
+  bool _isDisposed = false;
+  final ValueNotifier<List<PuffDetection>> _detectionsNotifier = ValueNotifier<List<PuffDetection>>([]);
+  int _captureIntervalMs = 650; // Smooth 60 FPS camera preview with decoupled inference
   List<PuffDetection> _currentDetections = [];
   
   // Lip / Mouth Proximity State Tracking
@@ -42,7 +45,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
   int _sessionPuffCount = 0;
   Session? _activeSession;
   final List<DateTime> _sessionPuffTimestamps = [];
-  img.Image? _testImage;
 
   @override
   void initState() {
@@ -68,11 +70,19 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
     await _detectionService.initialize();
 
+    final bool isWindows = !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
     // Release any previous controller before attempting new acquisition
     try {
       _frameLoopTimer?.cancel();
-      await _cameraController?.dispose();
-      _cameraController = null;
+      if (_cameraController != null) {
+        await _cameraController!.dispose();
+        _cameraController = null;
+        if (isWindows) {
+          // Allow Windows Media Foundation to cleanly release the hardware sensor handle
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+      }
     } catch (_) {}
 
     try {
@@ -86,13 +96,14 @@ class _DetectionScreenState extends State<DetectionScreen> {
         orElse: () => cameras.first,
       );
 
-      // Attempt initialization with medium preset, fallback to low if hardware MFT is constrained
       bool initialized = false;
+      // Medium is universally supported by virtually all webcams; fallback to low then high
       final presets = [ResolutionPreset.medium, ResolutionPreset.low, ResolutionPreset.high];
 
       for (var preset in presets) {
+        CameraController? controller;
         try {
-          final controller = CameraController(
+          controller = CameraController(
             frontCamera,
             preset,
             enableAudio: false,
@@ -105,6 +116,9 @@ class _DetectionScreenState extends State<DetectionScreen> {
           break;
         } catch (err) {
           _cameraError = err.toString();
+          try {
+            await controller?.dispose();
+          } catch (_) {}
         }
       }
 
@@ -127,27 +141,11 @@ class _DetectionScreenState extends State<DetectionScreen> {
     final bool isWindows = !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
     if (isWindows) {
-      // Windows decoupled 12-15 FPS snapshot loop with background Isolate inference
       _frameLoopTimer?.cancel();
-      _frameLoopTimer = Timer.periodic(const Duration(milliseconds: 75), (_) async {
-        if (!mounted || _isProcessingFrame || _cameraController == null || !_cameraController!.value.isInitialized) {
-          return;
-        }
-        _isProcessingFrame = true;
-        try {
-          final xfile = await _cameraController!.takePicture();
-          final bytes = await xfile.readAsBytes();
-          if (mounted) {
-            // Direct background Isolate decode & tensor packing
-            final detections = await _detectionService.detectFromJpegBytes(bytes);
-            if (mounted) {
-              _processDetections(detections);
-            }
-          }
-        } catch (e) {
-          // Graceful handling of snapshot interval
-        } finally {
-          _isProcessingFrame = false;
+      // Allow the camera preview texture to establish before starting snapshot inference
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (mounted && !_isDisposed) {
+          _runWindowsInferenceLoop();
         }
       });
     } else {
@@ -191,10 +189,13 @@ class _DetectionScreenState extends State<DetectionScreen> {
       puffing = false;
     }
 
-    setState(() {
-      _currentDetections = detections;
-      _isPuffingNow = puffing;
-    });
+    _detectionsNotifier.value = detections;
+    _currentDetections = detections;
+    if (_isPuffingNow != puffing) {
+      setState(() {
+        _isPuffingNow = puffing;
+      });
+    }
   }
 
   Future<void> _logDetectedPuffAuto() async {
@@ -257,7 +258,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
         if (mounted) {
           setState(() {
             _isProcessingFrame = true;
-            _testImage = null;
             _currentDetections = [];
           });
         }
@@ -271,7 +271,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
           if (mounted) {
             _processDetections(detections);
             setState(() {
-              _testImage = decodedImage;
               _isProcessingFrame = false;
             });
             showDialog(
@@ -300,10 +299,47 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
+  Future<void> _runWindowsInferenceLoop() async {
+    while (mounted && !_isDisposed) {
+      if (_cameraController != null &&
+          _cameraController!.value.isInitialized &&
+          !_isProcessingFrame) {
+        _isProcessingFrame = true;
+        XFile? xfile;
+        try {
+          xfile = await _cameraController!.takePicture();
+          final bytes = await xfile.readAsBytes();
+          if (mounted && !_isDisposed) {
+            final detections = await _detectionService.detectFromJpegBytes(bytes);
+            if (mounted && !_isDisposed) {
+              _processDetections(detections);
+            }
+          }
+        } catch (_) {
+          // Graceful handling of snapshot interval
+        } finally {
+          if (xfile != null) {
+            try {
+              final f = File(xfile.path);
+              if (await f.exists()) {
+                await f.delete();
+              }
+            } catch (_) {}
+          }
+          _isProcessingFrame = false;
+        }
+      }
+      // Pacing interval: gives the camera preview thread time to render at full 30-60 FPS without shutter starvation
+      await Future.delayed(Duration(milliseconds: _captureIntervalMs));
+    }
+  }
+
   @override
   void dispose() {
+    _isDisposed = true;
     _frameLoopTimer?.cancel();
     _cameraController?.dispose();
+    _detectionsNotifier.dispose();
     _detectionService.dispose();
     super.dispose();
   }
@@ -337,10 +373,15 @@ class _DetectionScreenState extends State<DetectionScreen> {
                             fit: StackFit.expand,
                             children: [
                               CameraPreview(_cameraController!),
-                              // Precision 60 FPS Interpolated Bounding Boxes
-                              AnimatedBoundingBoxesWidget(
-                                detections: _currentDetections,
-                                isPuffing: _isPuffingNow,
+                              // Precision 60 FPS Interpolated Bounding Boxes (repaints without rebuilding CameraPreview)
+                              ValueListenableBuilder<List<PuffDetection>>(
+                                valueListenable: _detectionsNotifier,
+                                builder: (context, detections, _) {
+                                  return AnimatedBoundingBoxesWidget(
+                                    detections: detections,
+                                    isPuffing: _isPuffingNow,
+                                  );
+                                },
                               ),
                             ],
                           ),
@@ -363,6 +404,29 @@ class _DetectionScreenState extends State<DetectionScreen> {
               right: 16,
               child: Column(
                 children: [
+                  // Camera Performance Mode Selector
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.8),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.speed, color: Colors.white70, size: 14),
+                        const SizedBox(width: 6),
+                        _buildModeChip('Smooth 60FPS', 650),
+                        const SizedBox(width: 4),
+                        _buildModeChip('Balanced', 350),
+                        const SizedBox(width: 4),
+                        _buildModeChip('Fast AI', 180),
+                      ],
+                    ),
+                  ),
+
                   // Session Stats Badge with Pulse Glow on Puff
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 300),
@@ -441,6 +505,32 @@ class _DetectionScreenState extends State<DetectionScreen> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeChip(String label, int intervalMs) {
+    final isSelected = _captureIntervalMs == intervalMs;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _captureIntervalMs = intervalMs;
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: isSelected ? AppTheme.primaryColor : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.white : Colors.white60,
+            fontSize: 10,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+          ),
         ),
       ),
     );
