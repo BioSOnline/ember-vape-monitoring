@@ -33,17 +33,6 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
   String? _analysisSummary;
   bool _savedToLog = false;
 
-  void _selectSampleVideo(String name, int sizeKb) {
-    setState(() {
-      _selectedVideoFile = File(name);
-      _videoFileName = name;
-      _videoSizeKb = sizeKb;
-      _detectedResults = null;
-      _analysisSummary = null;
-      _savedToLog = false;
-    });
-  }
-
   Future<void> _pickVideoFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.video,
@@ -193,7 +182,7 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'Upload a recorded video to run the on-device detector on sampled frames and view the detected moments.',
+                            'Upload a recorded video to run the on-device detector on extracted frames and view the detected moments.',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -245,32 +234,16 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
                   ),
                   const SizedBox(height: 16),
 
-              // Pick from device + preset samples
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.center,
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: _pickVideoFile,
-                        icon: const Icon(Icons.folder_open, size: 16),
-                        label: const Text('Browse Files'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.primaryColor,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () => _selectSampleVideo('assets/samples/vape_session_sample_1.mp4', 104),
-                        icon: const Icon(Icons.movie, size: 16),
-                        label: const Text('Sample 1'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () => _selectSampleVideo('assets/samples/vape_outdoor_sample_2.mp4', 131),
-                        icon: const Icon(Icons.movie, size: 16),
-                        label: const Text('Sample 2'),
-                      ),
-                    ],
+                  // Pick video from device
+                  ElevatedButton.icon(
+                    onPressed: _pickVideoFile,
+                    icon: const Icon(Icons.folder_open, size: 18),
+                    label: const Text('Browse Video File'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primaryColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    ),
                   ),
                 ],
               ),
