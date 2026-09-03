@@ -61,16 +61,8 @@ class VideoDemoDetectionService {
           final decoded = img.decodeImage(bytes);
           if (decoded != null) {
             final results = await _detectionService.detectFromImage(decoded);
-            for (final det in results) {
-              if (det.confidence >= 0.25) {
-                detections.add(VideoDetectionResult(
-                  offsetSeconds: 0,
-                  confidence: det.confidence,
-                  label: '${det.className} detected',
-                  classId: det.classId,
-                ));
-              }
-            }
+            final valid = results.where((d) => d.confidence >= 0.25).toList();
+            detections.addAll(createResultsFromDetections(valid, offsetSeconds: 0));
           }
         }
       } else {
@@ -119,23 +111,12 @@ class VideoDemoDetectionService {
             final decoded = img.decodeImage(bytes);
             if (decoded != null) {
               final frameDetections = await _detectionService.detectFromImage(decoded);
-              for (final det in frameDetections) {
-                if (det.confidence >= 0.25) {
-                  detections.add(VideoDetectionResult(
-                    offsetSeconds: i,
-                    confidence: det.confidence,
-                    label: '${det.className} detected',
-                    classId: det.classId,
-                  ));
-                }
-              }
+              final valid = frameDetections.where((d) => d.confidence >= 0.25).toList();
+              detections.addAll(createResultsFromDetections(valid, offsetSeconds: i));
             }
           }
         } else {
-          // Fallback: Run TFLite model on dataset test frames if video decoding is unavailable
-          onProgress?.call(0.50, 'Analyzing video frames via TFLite model...');
-          final fallbackDetections = await _runFallbackFrameInference(videoFile);
-          detections.addAll(fallbackDetections);
+          Logger.warning('No frames extracted from $fileName');
         }
       }
     } catch (e) {
@@ -156,43 +137,6 @@ class VideoDemoDetectionService {
 
     Logger.info('Video analysis completed for $fileName => ${detections.length} real model detections');
     return VideoAnalysisResult(detections: detections, summary: summary);
-  }
-
-  Future<List<VideoDetectionResult>> _runFallbackFrameInference(File videoFile) async {
-    final results = <VideoDetectionResult>[];
-    // Inspect dataset valid directory for real images to evaluate with model
-    final sampleDir = Directory('assets/newds/valid/images');
-    if (sampleDir.existsSync()) {
-      final sampleFiles = sampleDir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.endsWith('.jpg') || f.path.endsWith('.png'))
-          .take(4)
-          .toList();
-
-      int offset = 0;
-      for (final sf in sampleFiles) {
-        try {
-          final bytes = await sf.readAsBytes();
-          final decoded = img.decodeImage(bytes);
-          if (decoded != null) {
-            final dets = await _detectionService.detectFromImage(decoded);
-            for (final det in dets) {
-              if (det.confidence >= 0.25) {
-                results.add(VideoDetectionResult(
-                  offsetSeconds: offset,
-                  confidence: det.confidence,
-                  label: '${det.className} detected',
-                  classId: det.classId,
-                ));
-              }
-            }
-          }
-        } catch (_) {}
-        offset += 5;
-      }
-    }
-    return results;
   }
 
   String _formatTimestamp(int seconds) {
