@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_print
 // Seed script: Inserts 7 days of random puff events, sessions, and an
 // addiction score for raj@gmail.com via the Supabase REST API.
 //
@@ -58,7 +59,6 @@ Future<void> main() async {
     // Add remainder to first session
     puffsPerSession[0] += dailyPuffs % sessionCount;
 
-    int puffIndex = 0;
     for (int s = 0; s < sessionCount; s++) {
       final sessionId = uuid.v4();
       // Spread sessions across waking hours (7 AM - 11 PM)
@@ -112,8 +112,6 @@ Future<void> main() async {
           'input_mode': inputMode,
           'confidence_score': confidence != null ? double.parse(confidence.toStringAsFixed(3)) : null,
         });
-
-        puffIndex++;
       }
 
       totalPuffs += puffsInThisSession;

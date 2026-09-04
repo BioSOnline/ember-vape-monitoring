@@ -135,7 +135,7 @@ class _ManualEntryDialogState extends State<ManualEntryDialog> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: cs.onSurface.withOpacity(0.2),
+                color: cs.onSurface.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -148,7 +148,7 @@ class _ManualEntryDialogState extends State<ManualEntryDialog> {
           const SizedBox(height: 4),
           Text(
             'Record puffs taken outside camera detection',
-            style: tt.bodySmall?.copyWith(color: cs.onSurface.withOpacity(0.6)),
+            style: tt.bodySmall?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
           ),
           const SizedBox(height: 24),
 
@@ -193,7 +193,7 @@ class _ManualEntryDialogState extends State<ManualEntryDialog> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                border: Border.all(color: cs.outline.withOpacity(0.4)),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.4)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Row(
@@ -205,7 +205,7 @@ class _ManualEntryDialogState extends State<ManualEntryDialog> {
                     children: [
                       Text(
                         'Timestamp',
-                        style: tt.bodySmall?.copyWith(color: cs.onSurface.withOpacity(0.6)),
+                        style: tt.bodySmall?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
                       ),
                       Text(
                         '${_selectedTime.day}/${_selectedTime.month}/${_selectedTime.year} at ${TimeOfDay.fromDateTime(_selectedTime).format(context)}',

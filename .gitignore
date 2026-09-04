@@ -71,3 +71,4 @@ assets/newds/
 datasets/
 blobs/
 .vscode/
+training_progress.json
