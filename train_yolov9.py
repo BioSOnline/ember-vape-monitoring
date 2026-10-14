@@ -69,13 +69,13 @@ if __name__ == '__main__':
             need_fresh = True
 
     if need_fresh:
-        # Archive previous 4-class weights/runs if present
+        # Archive previous weights/runs safely before fresh start
         train_dir = os.path.abspath('runs/detect/train')
         if os.path.exists(train_dir):
-            archive_dir = os.path.abspath('runs/detect/train_legacy_4class')
-            if not os.path.exists(archive_dir):
-                print(f"Archiving previous training run to {archive_dir}...")
-                shutil.copytree(train_dir, archive_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_dir = os.path.abspath(f'runs/detect/train_backup_{timestamp}')
+            print(f"Archiving previous training run to {archive_dir}...")
+            shutil.copytree(train_dir, archive_dir)
             shutil.rmtree(train_dir)
         
         # Reset progress file
@@ -125,19 +125,26 @@ if __name__ == '__main__':
         torch.set_num_threads(num_threads)
         print(f"CPU Mode: Limiting PyTorch threads to {num_threads} to keep thermals & fan noise low.")
 
+    workers = args.workers if args.workers is not None else (2 if is_cpu else 8)
+    print(f"DataLoader Workers: {workers}")
+
     model = YOLO(base_model)
+    effective_lr0 = args.lr0 if args.lr0 is not None else (0.01 if need_fresh else 0.001)
+    print(f"Base Learning Rate (lr0): {effective_lr0}")
 
     results = model.train(
         data=DATA_YAML,
         epochs=epochs_to_train,
         imgsz=args.imgsz,
         batch=args.batch,
+        workers=workers,
         name='train',
         exist_ok=True,
         device=device,
         save=True,
         plots=True,
         cos_lr=True,
+        lr0=effective_lr0,
     )
 
     run_record = {
