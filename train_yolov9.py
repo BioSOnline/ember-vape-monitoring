@@ -17,6 +17,10 @@ def get_cli_args():
     parser.add_argument('--fresh', action='store_true', help='Force start fresh training from base yolov9t.pt')
     parser.add_argument('--batch', type=int, default=16, help='Batch size for training')
     parser.add_argument('--imgsz', type=int, default=640, help='Image resolution')
+    parser.add_argument('--lr0', type=float, default=None, help='Initial learning rate (defaults to 0.001 for fine-tuning, 0.01 for fresh)')
+    parser.add_argument('--device', type=str, default=None, help='Device to train on, e.g. "cpu" or "0" (defaults to GPU 0 if available)')
+    parser.add_argument('--threads', type=int, default=None, help='PyTorch CPU threads limit (default 4 on CPU for quiet operation)')
+    parser.add_argument('--workers', type=int, default=None, help='Dataloader workers (default 2 on CPU, 8 on GPU)')
     args, _ = parser.parse_known_args()
     return args
 
@@ -102,9 +106,24 @@ if __name__ == '__main__':
     print(f"Target Epochs:  +{epochs_to_train} (Total: {target_total_epochs})")
     print("=" * 65)
 
-    device = 0 if torch.cuda.is_available() else 'cpu'
-    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
+    if args.device is not None:
+        device = args.device
+        if str(device).lower() == 'cpu':
+            device_name = 'CPU'
+        elif str(device).isdigit() and torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(int(device))
+        else:
+            device_name = str(device)
+    else:
+        device = 0 if torch.cuda.is_available() else 'cpu'
+        device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print(f"Compute Device: {device_name} (device={device})")
+
+    is_cpu = str(device).lower() == 'cpu'
+    if is_cpu:
+        num_threads = args.threads if args.threads is not None else 4
+        torch.set_num_threads(num_threads)
+        print(f"CPU Mode: Limiting PyTorch threads to {num_threads} to keep thermals & fan noise low.")
 
     model = YOLO(base_model)
 
