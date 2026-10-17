@@ -25,14 +25,14 @@ class PuffDetection {
   // Check if the smoking device is positioned in the mouth / lips proximity zone
   // Face & mouth region in typical front camera usage:
   // Horizontally centered: 0.20 to 0.80
-  // Vertically in upper-middle: 0.15 to 0.65 (either tip or center is near mouth)
+  // Vertically in mouth/chin region: 0.22 to 0.72 (tip or center near lips)
   bool get isNearMouth {
     final bool horizontalInZone = x >= 0.20 && x <= 0.80;
-    final bool verticalInZone = topY <= 0.65 && bottomY >= 0.15 && y <= 0.60;
+    final bool verticalInZone = (topY <= 0.72 && bottomY >= 0.22) || (y >= 0.24 && y <= 0.72);
     return horizontalInZone && verticalInZone && confidence >= 0.25;
   }
 
-  bool get isPuffEvent => classId >= 0 && classId <= 3 && isNearMouth && confidence >= 0.35;
+  bool get isPuffEvent => classId >= 0 && classId <= 3 && isNearMouth && confidence >= 0.28;
 
   bool get isVape => classId == 0 || classId == 2;
   bool get isCigarette => classId == 1 || classId == 3;
