@@ -20,18 +20,32 @@ class PuffDetectionService {
     return _instance!;
   }
 
+  double get confidenceThreshold => _impl.confidenceThreshold;
+  set confidenceThreshold(double value) => _impl.confidenceThreshold = value;
+
+  String get targetDevice => _impl.targetDevice;
+  set targetDevice(String value) => _impl.targetDevice = value;
+
   Future<bool> initialize() => _impl.initialize();
 
-  Future<List<PuffDetection>> detectFromFrame(CameraImage frame, {int sensorOrientation = 0}) =>
-      _impl.detectFromFrame(frame, sensorOrientation: sensorOrientation);
+  Future<List<PuffDetection>> detectFromFrame(
+    CameraImage frame, {
+    int sensorOrientation = 0,
+    bool isFrontCamera = false,
+  }) =>
+      _impl.detectFromFrame(
+        frame,
+        sensorOrientation: sensorOrientation,
+        isFrontCamera: isFrontCamera,
+      );
 
   // Expose inference from static image for testing
   Future<List<PuffDetection>> detectFromImage(dynamic image) =>
       _impl.detectFromImage(image);
 
   // High-performance background Isolate inference directly from raw bytes
-  Future<List<PuffDetection>> detectFromJpegBytes(dynamic bytes) =>
-      _impl.detectFromJpegBytes(bytes);
+  Future<List<PuffDetection>> detectFromJpegBytes(dynamic bytes, {bool isFrontCamera = false}) =>
+      _impl.detectFromJpegBytes(bytes, isFrontCamera: isFrontCamera);
 
   void dispose() => _impl.dispose();
 }
