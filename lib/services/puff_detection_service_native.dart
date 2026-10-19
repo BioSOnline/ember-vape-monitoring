@@ -1,66 +1,352 @@
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 import 'package:ember/core/utils/logger.dart';
 import 'package:ember/models/puff_detection.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
-/// Top-level helper function for background isolate image packing
-Float32List _packImageToFloat32(img.Image image, int targetWidth, int targetHeight, bool isNHWC) {
-  final resized = (image.width == targetWidth && image.height == targetHeight)
+/// Holds the preprocessed packed input tensor and letterbox geometry
+/// required to map coordinates back to the original image coordinates.
+class _LetterboxResult {
+  final Float32List inputBytes;
+  final double scale;
+  final double padX;
+  final double padY;
+  final int origWidth;
+  final int origHeight;
+  final bool isFrontCamera;
+
+  const _LetterboxResult({
+    required this.inputBytes,
+    required this.scale,
+    required this.padX,
+    required this.padY,
+    required this.origWidth,
+    required this.origHeight,
+    this.isFrontCamera = false,
+  });
+}
+
+/// Helper function to perform aspect-ratio-preserving letterboxing with bilinear interpolation.
+_LetterboxResult _letterboxAndPack(
+  img.Image image,
+  int targetWidth,
+  int targetHeight,
+  bool isNHWC, {
+  bool isFrontCamera = false,
+}) {
+  final origWidth = image.width;
+  final origHeight = image.height;
+
+  final double scale = (targetWidth / origWidth < targetHeight / origHeight)
+      ? targetWidth / origWidth
+      : targetHeight / origHeight;
+  final int newWidth = (origWidth * scale).round().clamp(1, targetWidth);
+  final int newHeight = (origHeight * scale).round().clamp(1, targetHeight);
+  final double padX = (targetWidth - newWidth) / 2.0;
+  final double padY = (targetHeight - newHeight) / 2.0;
+
+  final resized = (origWidth == newWidth && origHeight == newHeight)
       ? image
-      : img.copyResize(image, width: targetWidth, height: targetHeight, interpolation: img.Interpolation.nearest);
+      : img.copyResize(
+          image,
+          width: newWidth,
+          height: newHeight,
+          interpolation: img.Interpolation.linear,
+        );
+
   final inputBytes = Float32List(1 * targetHeight * targetWidth * 3);
+  // Fill letterbox canvas with standard YOLO gray padding (114 / 255.0)
+  inputBytes.fillRange(0, inputBytes.length, 114.0 / 255.0);
+  final int startX = padX.round();
+  final int startY = padY.round();
 
   if (isNHWC) {
-    int idx = 0;
-    for (final pixel in resized) {
-      inputBytes[idx++] = pixel.r / 255.0;
-      inputBytes[idx++] = pixel.g / 255.0;
-      inputBytes[idx++] = pixel.b / 255.0;
+    for (int y = 0; y < newHeight; y++) {
+      final int targetY = startY + y;
+      if (targetY < 0 || targetY >= targetHeight) continue;
+      for (int x = 0; x < newWidth; x++) {
+        final int targetX = startX + x;
+        if (targetX < 0 || targetX >= targetWidth) continue;
+        final pixel = resized.getPixel(x, y);
+        final int idx = (targetY * targetWidth + targetX) * 3;
+        inputBytes[idx] = pixel.r / 255.0;
+        inputBytes[idx + 1] = pixel.g / 255.0;
+        inputBytes[idx + 2] = pixel.b / 255.0;
+      }
     }
   } else {
     final int planeSize = targetHeight * targetWidth;
-    int idx = 0;
-    for (final pixel in resized) {
-      inputBytes[0 * planeSize + idx] = pixel.r / 255.0;
-      inputBytes[1 * planeSize + idx] = pixel.g / 255.0;
-      inputBytes[2 * planeSize + idx] = pixel.b / 255.0;
-      idx++;
+    for (int y = 0; y < newHeight; y++) {
+      final int targetY = startY + y;
+      if (targetY < 0 || targetY >= targetHeight) continue;
+      for (int x = 0; x < newWidth; x++) {
+        final int targetX = startX + x;
+        if (targetX < 0 || targetX >= targetWidth) continue;
+        final pixel = resized.getPixel(x, y);
+        final int offset = targetY * targetWidth + targetX;
+        inputBytes[0 * planeSize + offset] = pixel.r / 255.0;
+        inputBytes[1 * planeSize + offset] = pixel.g / 255.0;
+        inputBytes[2 * planeSize + offset] = pixel.b / 255.0;
+      }
     }
   }
-  return inputBytes;
+
+  return _LetterboxResult(
+    inputBytes: inputBytes,
+    scale: scale,
+    padX: padX,
+    padY: padY,
+    origWidth: origWidth,
+    origHeight: origHeight,
+    isFrontCamera: isFrontCamera,
+  );
 }
 
-/// Top-level helper function for background isolate JPEG decode + resize + packing
-Float32List? _decodeJpegAndPack(Uint8List jpegBytes, int targetWidth, int targetHeight, bool isNHWC) {
-  final decoded = img.decodeImage(jpegBytes);
+/// Helper function for background isolate JPEG decode + letterbox packing
+_LetterboxResult? _decodeJpegAndLetterboxPack(
+  Uint8List jpegBytes,
+  int targetWidth,
+  int targetHeight,
+  bool isNHWC, {
+  bool isFrontCamera = false,
+}) {
+  var decoded = img.decodeImage(jpegBytes);
   if (decoded == null) return null;
-  return _packImageToFloat32(decoded, targetWidth, targetHeight, isNHWC);
+  decoded = img.bakeOrientation(decoded);
+  return _letterboxAndPack(decoded, targetWidth, targetHeight, isNHWC, isFrontCamera: isFrontCamera);
 }
 
-/// Top-level helper function for YUV420 conversion
-img.Image _convertYUV420(int width, int height, Uint8List yBuffer, Uint8List uBuffer, Uint8List vBuffer,
-    int yRowStride, int yPixelStride, int uvRowStride, int uvPixelStride) {
-  final res = img.Image(width: width, height: height);
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      final int yIndex = y * yRowStride + x * yPixelStride;
-      final int uvIndex = (y ~/ 2) * uvRowStride + (x ~/ 2) * uvPixelStride;
+/// Ultra-fast single-pass YUV420 to letterbox sampler with built-in hardware rotation.
+/// Eliminates all intermediate img.Image allocations, rotations, and bilinear resizers.
+_LetterboxResult _directSampleYuv420ToLetterbox({
+  required int width,
+  required int height,
+  required Uint8List yBuffer,
+  required Uint8List uBuffer,
+  required Uint8List vBuffer,
+  required int yRowStride,
+  required int yPixelStride,
+  required int uvRowStride,
+  required int uvPixelStride,
+  required int sensorOrientation,
+  required int targetWidth,
+  required int targetHeight,
+  required bool isNHWC,
+  required bool isFrontCamera,
+}) {
+  final int rotationAngle = isFrontCamera
+      ? (360 - sensorOrientation) % 360
+      : sensorOrientation;
 
-      final yp = yBuffer[yIndex];
-      final up = uBuffer[uvIndex] - 128;
-      final vp = vBuffer[uvIndex] - 128;
+  final bool swapDims = (rotationAngle == 90 || rotationAngle == 270);
+  final int rotW = swapDims ? height : width;
+  final int rotH = swapDims ? width : height;
 
-      int r = (yp + vp * 1436 / 1024).round().clamp(0, 255);
-      int g = (yp - up * 46549 / 131072 + 44 - vp * 93604 / 131072 + 91).round().clamp(0, 255);
-      int b = (yp + up * 1814 / 1024).round().clamp(0, 255);
+  final double scale = (targetWidth / rotW < targetHeight / rotH)
+      ? targetWidth / rotW
+      : targetHeight / rotH;
+  final int newW = (rotW * scale).round().clamp(1, targetWidth);
+  final int newH = (rotH * scale).round().clamp(1, targetHeight);
+  final double padX = (targetWidth - newW) / 2.0;
+  final double padY = (targetHeight - newH) / 2.0;
+  final int startX = padX.round();
+  final int startY = padY.round();
 
-      res.setPixelRgb(x, y, r, g, b);
+  final inputBytes = Float32List(1 * targetHeight * targetWidth * 3);
+  inputBytes.fillRange(0, inputBytes.length, 114.0 / 255.0);
+
+  final int yLen = yBuffer.length;
+  final int uLen = uBuffer.length;
+  final int vLen = vBuffer.length;
+
+  final double invScale = 1.0 / scale;
+  final int maxSrcX = width - 1;
+  final int maxSrcY = height - 1;
+  final int planeSize = targetHeight * targetWidth;
+
+  for (int dy = 0; dy < newH; dy++) {
+    final int targetY = startY + dy;
+    if (targetY < 0 || targetY >= targetHeight) continue;
+    final double rotY = dy * invScale;
+
+    for (int dx = 0; dx < newW; dx++) {
+      final int targetX = startX + dx;
+      if (targetX < 0 || targetX >= targetWidth) continue;
+      final double rotX = dx * invScale;
+
+      int srcX;
+      int srcY;
+      if (rotationAngle == 90) {
+        srcX = rotY.toInt();
+        srcY = maxSrcY - rotX.toInt();
+      } else if (rotationAngle == 270) {
+        srcX = maxSrcX - rotY.toInt();
+        srcY = rotX.toInt();
+      } else if (rotationAngle == 180) {
+        srcX = maxSrcX - rotX.toInt();
+        srcY = maxSrcY - rotY.toInt();
+      } else {
+        srcX = rotX.toInt();
+        srcY = rotY.toInt();
+      }
+
+      if (srcX < 0) {
+        srcX = 0;
+      } else if (srcX > maxSrcX) {
+        srcX = maxSrcX;
+      }
+      if (srcY < 0) {
+        srcY = 0;
+      } else if (srcY > maxSrcY) {
+        srcY = maxSrcY;
+      }
+
+      final int yIdx = srcY * yRowStride + srcX * yPixelStride;
+      final int uvIdx = (srcY >> 1) * uvRowStride + (srcX >> 1) * uvPixelStride;
+
+      if (yIdx >= yLen || uvIdx >= uLen || uvIdx >= vLen) continue;
+
+      final int yp = yBuffer[yIdx];
+      final int up = uBuffer[uvIdx] - 128;
+      final int vp = vBuffer[uvIdx] - 128;
+
+      final double r = (yp + 1.402 * vp).clamp(0, 255) / 255.0;
+      final double g = (yp - 0.344136 * up - 0.714136 * vp).clamp(0, 255) / 255.0;
+      final double b = (yp + 1.772 * up).clamp(0, 255) / 255.0;
+
+      if (isNHWC) {
+        final int idx = (targetY * targetWidth + targetX) * 3;
+        inputBytes[idx] = r;
+        inputBytes[idx + 1] = g;
+        inputBytes[idx + 2] = b;
+      } else {
+        final int offset = targetY * targetWidth + targetX;
+        inputBytes[0 * planeSize + offset] = r;
+        inputBytes[1 * planeSize + offset] = g;
+        inputBytes[2 * planeSize + offset] = b;
+      }
     }
   }
-  return res;
+
+  return _LetterboxResult(
+    inputBytes: inputBytes,
+    scale: scale,
+    padX: padX,
+    padY: padY,
+    origWidth: rotW,
+    origHeight: rotH,
+    isFrontCamera: isFrontCamera,
+  );
+}
+
+/// Ultra-fast single-pass BGRA to letterbox sampler with built-in hardware rotation.
+_LetterboxResult _directSampleBgraToLetterbox({
+  required int width,
+  required int height,
+  required Uint8List bgraBytes,
+  required int sensorOrientation,
+  required int targetWidth,
+  required int targetHeight,
+  required bool isNHWC,
+  required bool isFrontCamera,
+}) {
+  final int rotationAngle = isFrontCamera
+      ? (360 - sensorOrientation) % 360
+      : sensorOrientation;
+
+  final bool swapDims = (rotationAngle == 90 || rotationAngle == 270);
+  final int rotW = swapDims ? height : width;
+  final int rotH = swapDims ? width : height;
+
+  final double scale = (targetWidth / rotW < targetHeight / rotH)
+      ? targetWidth / rotW
+      : targetHeight / rotH;
+  final int newW = (rotW * scale).round().clamp(1, targetWidth);
+  final int newH = (rotH * scale).round().clamp(1, targetHeight);
+  final double padX = (targetWidth - newW) / 2.0;
+  final double padY = (targetHeight - newH) / 2.0;
+  final int startX = padX.round();
+  final int startY = padY.round();
+
+  final inputBytes = Float32List(1 * targetHeight * targetWidth * 3);
+  inputBytes.fillRange(0, inputBytes.length, 114.0 / 255.0);
+
+  final double invScale = 1.0 / scale;
+  final int maxSrcX = width - 1;
+  final int maxSrcY = height - 1;
+  final int planeSize = targetHeight * targetWidth;
+
+  for (int dy = 0; dy < newH; dy++) {
+    final int targetY = startY + dy;
+    if (targetY < 0 || targetY >= targetHeight) continue;
+    final double rotY = dy * invScale;
+
+    for (int dx = 0; dx < newW; dx++) {
+      final int targetX = startX + dx;
+      if (targetX < 0 || targetX >= targetWidth) continue;
+      final double rotX = dx * invScale;
+
+      int srcX;
+      int srcY;
+      if (rotationAngle == 90) {
+        srcX = rotY.toInt();
+        srcY = maxSrcY - rotX.toInt();
+      } else if (rotationAngle == 270) {
+        srcX = maxSrcX - rotY.toInt();
+        srcY = rotX.toInt();
+      } else if (rotationAngle == 180) {
+        srcX = maxSrcX - rotX.toInt();
+        srcY = maxSrcY - rotY.toInt();
+      } else {
+        srcX = rotX.toInt();
+        srcY = rotY.toInt();
+      }
+
+      if (srcX < 0) {
+        srcX = 0;
+      } else if (srcX > maxSrcX) {
+        srcX = maxSrcX;
+      }
+      if (srcY < 0) {
+        srcY = 0;
+      } else if (srcY > maxSrcY) {
+        srcY = maxSrcY;
+      }
+
+      final int srcIdx = (srcY * width + srcX) * 4;
+      if (srcIdx + 2 >= bgraBytes.length) continue;
+
+      final double b = bgraBytes[srcIdx] / 255.0;
+      final double g = bgraBytes[srcIdx + 1] / 255.0;
+      final double r = bgraBytes[srcIdx + 2] / 255.0;
+
+      if (isNHWC) {
+        final int idx = (targetY * targetWidth + targetX) * 3;
+        inputBytes[idx] = r;
+        inputBytes[idx + 1] = g;
+        inputBytes[idx + 2] = b;
+      } else {
+        final int offset = targetY * targetWidth + targetX;
+        inputBytes[0 * planeSize + offset] = r;
+        inputBytes[1 * planeSize + offset] = g;
+        inputBytes[2 * planeSize + offset] = b;
+      }
+    }
+  }
+
+  return _LetterboxResult(
+    inputBytes: inputBytes,
+    scale: scale,
+    padX: padX,
+    padY: padY,
+    origWidth: rotW,
+    origHeight: rotH,
+    isFrontCamera: isFrontCamera,
+  );
 }
 
 /// Native (Android/iOS/Desktop) implementation using TFLite with multi-threading & isolates.
@@ -68,17 +354,67 @@ class PuffDetectionServiceImpl {
   Interpreter? _interpreter;
   IsolateInterpreter? _isolateInterpreter;
   bool _isInitialized = false;
+  Future<bool>? _initFuture;
+  List<List<List<double>>>? _cachedOutputBuffer;
   List<PuffDetection> _previousDetections = [];
 
-  Future<bool> initialize() async {
-    if (_isInitialized) return true;
+  /// Tunable confidence threshold (defaults to 0.22 for responsive real-world device detection)
+  double confidenceThreshold = 0.22;
+
+  /// Target device mode: 'both' (default for EMBER - detects both Vape and Cigarette automatically)
+  String targetDevice = 'both';
+
+  int _framesReceived = 0;
+  int _framesProcessed = 0;
+
+  int get framesReceived => _framesReceived;
+  int get framesProcessed => _framesProcessed;
+
+  List<List<List<double>>> _getOutputBuffer(int d1, int d2) {
+    if (_cachedOutputBuffer == null ||
+        _cachedOutputBuffer![0].length != d1 ||
+        _cachedOutputBuffer![0][0].length != d2) {
+      _cachedOutputBuffer = List.generate(
+        1,
+        (_) => List.generate(d1, (_) => List.filled(d2, 0.0)),
+      );
+    }
+    return _cachedOutputBuffer!;
+  }
+
+  Future<bool> initialize() {
+    if (_isInitialized) return Future.value(true);
+    _initFuture ??= _doInitialize();
+    return _initFuture!;
+  }
+
+  Future<bool> _doInitialize() async {
     try {
       final options = InterpreterOptions()..threads = 4;
 
-      _interpreter = await Interpreter.fromAsset(
-        'assets/models/puff_detection.tflite',
-        options: options,
-      );
+      if (!kIsWeb && Platform.isAndroid) {
+        try {
+          final gpuDelegate = GpuDelegateV2();
+          options.addDelegate(gpuDelegate);
+          Logger.info('GpuDelegateV2 attached for Android hardware acceleration');
+        } catch (e) {
+          Logger.info('GPU delegate unavailable, using multi-threaded CPU: $e');
+        }
+      }
+
+      try {
+        _interpreter = await Interpreter.fromAsset(
+          'assets/models/puff_detection.tflite',
+          options: options,
+        );
+      } catch (e) {
+        Logger.warning('GPU model load fallback ($e), falling back to standard CPU');
+        _interpreter = await Interpreter.fromAsset(
+          'assets/models/puff_detection.tflite',
+          options: InterpreterOptions()..threads = 4,
+        );
+      }
+
       try {
         _isolateInterpreter = await IsolateInterpreter.create(address: _interpreter!.address);
         Logger.info('IsolateInterpreter initialized for non-blocking background inference');
@@ -89,7 +425,7 @@ class PuffDetectionServiceImpl {
 
       final inputTensor = _interpreter!.getInputTensor(0);
       final outputTensor = _interpreter!.getOutputTensor(0);
-      Logger.info('TFLite Float16 model loaded successfully.');
+      Logger.info('TFLite model loaded successfully.');
       Logger.info('  Input shape:  ${inputTensor.shape}  type: ${inputTensor.type}');
       Logger.info('  Output shape: ${outputTensor.shape}  type: ${outputTensor.type}');
       return true;
@@ -100,7 +436,10 @@ class PuffDetectionServiceImpl {
   }
 
   /// High-performance inference directly from raw JPEG snapshot bytes (offloads to background isolate)
-  Future<List<PuffDetection>> detectFromJpegBytes(Uint8List jpegBytes) async {
+  Future<List<PuffDetection>> detectFromJpegBytes(
+    Uint8List jpegBytes, {
+    bool isFrontCamera = false,
+  }) async {
     if (!_isInitialized || _interpreter == null) {
       Logger.warning('Puff detection disabled — TFLite model not available');
       return [];
@@ -113,68 +452,101 @@ class PuffDetectionServiceImpl {
       final int inputHeight = isNHWC ? inputShape[1] : inputShape[2];
       final int inputWidth = isNHWC ? inputShape[2] : inputShape[3];
 
-      // Decode JPEG, resize, and pack in Background Isolate (Zero UI thread blocking)
-      final inputBytes = await Isolate.run(() {
-        return _decodeJpegAndPack(jpegBytes, inputWidth, inputHeight, isNHWC);
+      final letterboxResult = await Isolate.run(() {
+        return _decodeJpegAndLetterboxPack(
+          jpegBytes,
+          inputWidth,
+          inputHeight,
+          isNHWC,
+          isFrontCamera: isFrontCamera,
+        );
       });
 
-      if (inputBytes == null) return [];
+      if (letterboxResult == null) return [];
 
-      return await _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
+      return await _runInferenceOnPackedBytes(letterboxResult, inputWidth, inputHeight, isNHWC, stopwatch);
     } catch (e) {
       Logger.error('Error during JPEG inference: $e');
       return [];
     }
   }
 
-  Future<List<PuffDetection>> detectFromFrame(CameraImage frame, {int sensorOrientation = 0}) async {
+  /// High-performance inference from live camera frame using direct single-pass sampling
+  Future<List<PuffDetection>> detectFromFrame(
+    CameraImage frame, {
+    int sensorOrientation = 0,
+    bool isFrontCamera = false,
+  }) async {
+    _framesReceived++;
     if (!_isInitialized || _interpreter == null) {
       Logger.warning('Puff detection disabled — TFLite model not available');
       return [];
     }
 
+    final stopwatch = Stopwatch()..start();
     try {
-      img.Image? convertedImage;
-      if (frame.format.group == ImageFormatGroup.yuv420) {
-        final yPlane = frame.planes[0];
-        final uPlane = frame.planes[1];
-        final vPlane = frame.planes[2];
-        convertedImage = _convertYUV420(
-          frame.width,
-          frame.height,
-          yPlane.bytes,
-          uPlane.bytes,
-          vPlane.bytes,
-          yPlane.bytesPerRow,
-          yPlane.bytesPerPixel ?? 1,
-          uPlane.bytesPerRow,
-          uPlane.bytesPerPixel ?? 1,
-        );
-      } else if (frame.format.group == ImageFormatGroup.bgra8888) {
-        convertedImage = img.Image.fromBytes(
+      final inputShape = _interpreter!.getInputTensor(0).shape;
+      final bool isNHWC = inputShape.length == 4 && inputShape[3] == 3;
+      final int inputHeight = isNHWC ? inputShape[1] : inputShape[2];
+      final int inputWidth = isNHWC ? inputShape[2] : inputShape[3];
+
+      _LetterboxResult? letterboxResult;
+
+      if (frame.format.group == ImageFormatGroup.yuv420 && frame.planes.length >= 3) {
+        letterboxResult = _directSampleYuv420ToLetterbox(
           width: frame.width,
           height: frame.height,
-          bytes: frame.planes[0].bytes.buffer,
-          order: img.ChannelOrder.bgra,
+          yBuffer: frame.planes[0].bytes,
+          uBuffer: frame.planes[1].bytes,
+          vBuffer: frame.planes[2].bytes,
+          yRowStride: frame.planes[0].bytesPerRow,
+          yPixelStride: frame.planes[0].bytesPerPixel ?? 1,
+          uvRowStride: frame.planes[1].bytesPerRow,
+          uvPixelStride: frame.planes[1].bytesPerPixel ?? 1,
+          sensorOrientation: sensorOrientation,
+          targetWidth: inputWidth,
+          targetHeight: inputHeight,
+          isNHWC: isNHWC,
+          isFrontCamera: isFrontCamera,
+        );
+      } else if (frame.format.group == ImageFormatGroup.bgra8888 && frame.planes.isNotEmpty) {
+        letterboxResult = _directSampleBgraToLetterbox(
+          width: frame.width,
+          height: frame.height,
+          bgraBytes: frame.planes[0].bytes,
+          sensorOrientation: sensorOrientation,
+          targetWidth: inputWidth,
+          targetHeight: inputHeight,
+          isNHWC: isNHWC,
+          isFrontCamera: isFrontCamera,
         );
       }
 
-      if (convertedImage == null) {
-        return [];
+      if (letterboxResult == null) return [];
+
+      final detections = await _runInferenceOnPackedBytes(
+        letterboxResult,
+        inputWidth,
+        inputHeight,
+        isNHWC,
+        stopwatch,
+      );
+
+      _framesProcessed++;
+      if (_framesProcessed % 15 == 0 || detections.isNotEmpty) {
+        Logger.info(
+          'Live Frame #$_framesProcessed (received #$_framesReceived): latency=${stopwatch.elapsedMilliseconds}ms, detections=${detections.length}',
+        );
       }
 
-      img.Image rotatedImage = convertedImage;
-      if (sensorOrientation != 0) {
-        rotatedImage = img.copyRotate(convertedImage, angle: sensorOrientation);
-      }
-
-      return await detectFromImage(rotatedImage);
-    } catch (e) {
-      Logger.error('Error during frame inference: $e');
+      return detections;
+    } catch (e, st) {
+      Logger.error('Error during frame inference: $e', error: e, stackTrace: st);
       return [];
     }
   }
 
+  /// Inference from static image (used for testing or frame-by-frame analysis)
   Future<List<PuffDetection>> detectFromImage(img.Image image) async {
     if (!_isInitialized || _interpreter == null) {
       Logger.warning('Puff detection disabled — TFLite model not available');
@@ -188,12 +560,13 @@ class PuffDetectionServiceImpl {
       final int inputHeight = isNHWC ? inputShape[1] : inputShape[2];
       final int inputWidth = isNHWC ? inputShape[2] : inputShape[3];
 
-      // Pack pixels in background isolate
-      final inputBytes = await Isolate.run(() {
-        return _packImageToFloat32(image, inputWidth, inputHeight, isNHWC);
+      final orientedImage = img.bakeOrientation(image);
+
+      final letterboxResult = await Isolate.run(() {
+        return _letterboxAndPack(orientedImage, inputWidth, inputHeight, isNHWC);
       });
 
-      return await _runInferenceOnPackedBytes(inputBytes, inputWidth, inputHeight, isNHWC, stopwatch);
+      return await _runInferenceOnPackedBytes(letterboxResult, inputWidth, inputHeight, isNHWC, stopwatch);
     } catch (e) {
       Logger.error('Error during image inference: $e');
       return [];
@@ -201,7 +574,7 @@ class PuffDetectionServiceImpl {
   }
 
   Future<List<PuffDetection>> _runInferenceOnPackedBytes(
-    Float32List inputBytes,
+    _LetterboxResult packResult,
     int inputWidth,
     int inputHeight,
     bool isNHWC,
@@ -209,16 +582,14 @@ class PuffDetectionServiceImpl {
   ) async {
     try {
       final input = isNHWC
-          ? inputBytes.reshape([1, inputHeight, inputWidth, 3])
-          : inputBytes.reshape([1, 3, inputHeight, inputWidth]);
+          ? packResult.inputBytes.reshape([1, inputHeight, inputWidth, 3])
+          : packResult.inputBytes.reshape([1, 3, inputHeight, inputWidth]);
 
       final outputShape = _interpreter!.getOutputTensor(0).shape;
-      bool isTransposed = outputShape[1] < outputShape[2];
-      final numProposals = isTransposed ? outputShape[2] : outputShape[1];
-      final numAttributes = isTransposed ? outputShape[1] : outputShape[2];
+      final bool isTransposed = outputShape[1] < outputShape[2];
+      final int numProposals = isTransposed ? outputShape[2] : outputShape[1];
 
-      var outputBuffer = List.generate(
-          1, (_) => List.generate(outputShape[1], (_) => List.filled(outputShape[2], 0.0)));
+      final outputBuffer = _getOutputBuffer(outputShape[1], outputShape[2]);
 
       final inferenceStart = stopwatch.elapsedMilliseconds;
       if (_isolateInterpreter != null) {
@@ -229,8 +600,9 @@ class PuffDetectionServiceImpl {
       final inferenceTime = stopwatch.elapsedMilliseconds - inferenceStart;
 
       List<PuffDetection> rawCandidates = [];
-      const confidenceThreshold = 0.25;
       double maxConfObserved = 0.0;
+
+      final mode = targetDevice.toLowerCase().trim();
 
       for (var i = 0; i < numProposals; i++) {
         final cx = isTransposed ? outputBuffer[0][0][i] : outputBuffer[0][i][0];
@@ -238,43 +610,77 @@ class PuffDetectionServiceImpl {
         final w  = isTransposed ? outputBuffer[0][2][i] : outputBuffer[0][i][2];
         final h  = isTransposed ? outputBuffer[0][3][i] : outputBuffer[0][i][3];
 
+        final double vapeConf = isTransposed ? outputBuffer[0][4][i] : outputBuffer[0][i][4];
+        final double cigConf  = isTransposed ? outputBuffer[0][5][i] : outputBuffer[0][i][5];
+
         double bestConf = 0.0;
         int bestClass = -1;
 
-        for (int c = 4; c < numAttributes; c++) {
-          final conf = isTransposed ? outputBuffer[0][c][i] : outputBuffer[0][i][c];
-          if (conf > bestConf) {
-            bestConf = conf;
-            bestClass = c - 4;
+        if (mode == 'vape') {
+          if (vapeConf >= confidenceThreshold) {
+            bestConf = vapeConf;
+            bestClass = 0;
+          }
+        } else if (mode == 'cigarette') {
+          if (cigConf >= confidenceThreshold) {
+            bestConf = cigConf;
+            bestClass = 1;
+          }
+        } else {
+          // 'both' mode: select whichever class is higher
+          final double maxC = vapeConf >= cigConf ? vapeConf : cigConf;
+          if (maxC >= confidenceThreshold) {
+            bestConf = maxC;
+            bestClass = vapeConf >= cigConf ? 0 : 1;
           }
         }
 
-        if (bestConf > maxConfObserved) {
-          maxConfObserved = bestConf;
+        final double highestRaw = vapeConf >= cigConf ? vapeConf : cigConf;
+        if (highestRaw > maxConfObserved) {
+          maxConfObserved = highestRaw;
         }
 
-        if (bestConf <= 0.0) continue;
+        if (bestConf < confidenceThreshold || bestClass < 0) continue;
 
-        if (bestConf > confidenceThreshold) {
-          final double scaleX = (cx > 1.1 || w > 1.1) ? inputWidth.toDouble() : 1.0;
-          final double scaleY = (cy > 1.1 || h > 1.1) ? inputHeight.toDouble() : 1.0;
+        // Coordinates in 640x640 space
+        final double pixelCX = cx > 1.1 ? cx : cx * inputWidth;
+        final double pixelCY = cy > 1.1 ? cy : cy * inputHeight;
+        final double pixelW  = w > 1.1 ? w : w * inputWidth;
+        final double pixelH  = h > 1.1 ? h : h * inputHeight;
 
-          rawCandidates.add(PuffDetection(
-            x: cx / scaleX,
-            y: cy / scaleY,
-            width: w / scaleX,
-            height: h / scaleY,
-            confidence: bestConf,
-            classId: bestClass,
-          ));
+        // Un-letterbox: remove padding and divide by scale
+        final double origCX = (pixelCX - packResult.padX) / packResult.scale;
+        final double origCY = (pixelCY - packResult.padY) / packResult.scale;
+        final double origW  = pixelW / packResult.scale;
+        final double origH  = pixelH / packResult.scale;
+
+        double normX = (origCX / packResult.origWidth).clamp(0.0, 1.0);
+        final double normY = (origCY / packResult.origHeight).clamp(0.0, 1.0);
+        final double normW = (origW / packResult.origWidth).clamp(0.0, 1.0);
+        final double normH = (origH / packResult.origHeight).clamp(0.0, 1.0);
+
+        // Mirror X for front camera selfie preview alignment
+        if (packResult.isFrontCamera) {
+          normX = (1.0 - normX).clamp(0.0, 1.0);
         }
+
+        rawCandidates.add(PuffDetection(
+          x: normX,
+          y: normY,
+          width: normW,
+          height: normH,
+          confidence: bestConf,
+          classId: bestClass,
+        ));
       }
 
       final rawDetections = _applyNMS(rawCandidates, iouThreshold: 0.45);
       final detections = _smoothDetections(rawDetections);
 
       final totalTime = stopwatch.elapsedMilliseconds;
-      Logger.info('Inference Complete: total=${totalTime}ms, inference=${inferenceTime}ms, max_conf=${maxConfObserved.toStringAsFixed(3)}, raw=${rawCandidates.length}, detections=${detections.length}');
+      Logger.info(
+        'Inference: total=${totalTime}ms (model=${inferenceTime}ms), max_conf=${maxConfObserved.toStringAsFixed(3)}, raw=${rawCandidates.length}, detections=${detections.length}',
+      );
 
       return detections;
     } catch (e) {
@@ -306,6 +712,9 @@ class PuffDetectionServiceImpl {
         if (suppressed[j]) continue;
 
         final boxB = boxes[j];
+        // Only suppress overlapping boxes of the SAME class
+        if (boxA.classId != boxB.classId) continue;
+
         final x1B = boxB.x - boxB.width / 2;
         final y1B = boxB.y - boxB.height / 2;
         final x2B = boxB.x + boxB.width / 2;
@@ -379,7 +788,11 @@ class PuffDetectionServiceImpl {
   void dispose() {
     _isolateInterpreter?.close();
     _interpreter?.close();
+    _interpreter = null;
+    _isolateInterpreter = null;
     _isInitialized = false;
+    _initFuture = null;
+    _cachedOutputBuffer = null;
     Logger.info('Puff detection service disposed');
   }
 }
