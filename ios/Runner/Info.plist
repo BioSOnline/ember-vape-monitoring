@@ -6,6 +6,8 @@
 	<string>EMBER needs access to the camera for live puff detection.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>EMBER needs microphone access for the camera plugin.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>EMBER needs access to your photo library to select video recordings for puff detection analysis.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
