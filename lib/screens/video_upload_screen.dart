@@ -1,9 +1,11 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:ember/core/config/supabase_config.dart';
 import 'package:ember/core/constants/app_constants.dart';
 import 'package:ember/core/theme/app_theme.dart';
+import 'package:ember/core/utils/logger.dart';
 import 'package:ember/models/puff_event.dart';
 import 'package:ember/services/supabase_service.dart';
 import 'package:ember/services/video_demo_detection_service.dart';
@@ -24,6 +26,9 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
   File? _selectedVideoFile;
   String? _videoFileName;
   int _videoSizeKb = 0;
+  double? _videoDurationSeconds;
+  int? _videoTotalFrames;
+  int? _analyzedFramesCount;
 
   bool _isProcessing = false;
   double _processingProgress = 0.0;
@@ -34,24 +39,62 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
   bool _savedToLog = false;
 
   Future<void> _pickVideoFile() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.video,
-      allowMultiple: false,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final picked = result.files.first;
-    final path = picked.path;
-    if (path == null) return;
-    final file = File(path);
-    final sizeKb = (picked.size / 1024).round();
-    setState(() {
-      _selectedVideoFile = file;
-      _videoFileName = picked.name;
-      _videoSizeKb = sizeKb;
-      _detectedResults = null;
-      _analysisSummary = null;
-      _savedToLog = false;
-    });
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        allowMultiple: false,
+        withData: false, // Avoid loading multi-MB videos into heap memory across IPC
+      );
+      if (result == null || result.files.isEmpty) return;
+      final picked = result.files.first;
+
+      File? file;
+      if (picked.path != null && File(picked.path!).existsSync()) {
+        file = File(picked.path!);
+      } else if (picked.bytes != null) {
+        // Fallback for Web or platforms returning raw bytes
+        final tempDir = await getTemporaryDirectory();
+        final ext = picked.extension ?? 'mp4';
+        final tempFile = File('${tempDir.path}/ember_video_${DateTime.now().millisecondsSinceEpoch}.$ext');
+        await tempFile.writeAsBytes(picked.bytes!);
+        file = tempFile;
+      }
+
+      if (file == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not access selected video file. Please try another file.')),
+          );
+        }
+        return;
+      }
+
+      final sizeKb = (file.lengthSync() / 1024).round();
+      final duration = await VideoDemoDetectionService.getVideoDuration(file);
+      final estimatedFrames = duration != null && duration > 0
+          ? (duration * VideoDemoDetectionService.analysisFps).ceil()
+          : null;
+
+      setState(() {
+        _selectedVideoFile = file;
+        _videoFileName = picked.name;
+        _videoSizeKb = sizeKb;
+        _videoDurationSeconds = duration;
+        _videoTotalFrames = estimatedFrames;
+        _analyzedFramesCount = null;
+        _detectedResults = null;
+        _analysisSummary = null;
+        _savedToLog = false;
+      });
+      Logger.info('Selected video for analysis: ${picked.name} ($sizeKb KB)');
+    } catch (e, st) {
+      Logger.error('Failed to pick video file: $e', error: e, stackTrace: st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error selecting video: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
   }
 
   Future<void> _processVideo() async {
@@ -68,26 +111,44 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
       _processingStatus = 'Initializing TFLite model...';
     });
 
-    final analysis = await _demoDetectionService.analyzeVideo(
-      _selectedVideoFile!,
-      onProgress: (progress, status) {
-        if (mounted) {
-          setState(() {
-            _processingProgress = progress;
-            _processingStatus = status;
-          });
-        }
-      },
-    );
+    try {
+      final analysis = await _demoDetectionService.analyzeVideo(
+        _selectedVideoFile!,
+        onProgress: (progress, status) {
+          if (mounted) {
+            setState(() {
+              _processingProgress = progress;
+              _processingStatus = status;
+            });
+          }
+        },
+      );
 
-    if (mounted) {
-      setState(() {
-        _processingProgress = 1.0;
-        _processingStatus = 'Analysis complete!';
-        _isProcessing = false;
-        _detectedResults = analysis.detections;
-        _analysisSummary = analysis.summary;
-      });
+      if (mounted) {
+        setState(() {
+          _processingProgress = 1.0;
+          _processingStatus = 'Analysis complete!';
+          _isProcessing = false;
+          _detectedResults = analysis.detections;
+          _analysisSummary = analysis.summary;
+          _analyzedFramesCount = analysis.totalFrames;
+          _videoTotalFrames = analysis.totalFrames;
+          if (analysis.durationSeconds > 0) {
+            _videoDurationSeconds = analysis.durationSeconds;
+          }
+        });
+      }
+    } catch (e, st) {
+      Logger.error('Video processing error: $e', error: e, stackTrace: st);
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _processingStatus = 'Analysis failed: $e';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error analyzing video: $e'), backgroundColor: Colors.red),
+        );
+      }
     }
   }
 
@@ -138,6 +199,13 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
             ),
           );
         }
+      }
+    } catch (e, st) {
+      Logger.error('Error saving puffs to Supabase: $e', error: e, stackTrace: st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error saving to log: $e'), backgroundColor: Colors.red),
+        );
       }
     } finally {
       if (mounted) setState(() => _isProcessing = false);
@@ -228,7 +296,9 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
                   const SizedBox(height: 4),
                   Text(
                     _selectedVideoFile != null
-                        ? 'Size: ${(_videoSizeKb / 1024).toStringAsFixed(1)} MB'
+                        ? (_videoDurationSeconds != null
+                            ? 'Size: ${(_videoSizeKb / 1024).toStringAsFixed(1)} MB • ${_videoDurationSeconds!.toStringAsFixed(1)}s • ${_videoTotalFrames ?? _analyzedFramesCount ?? (_videoDurationSeconds! * VideoDemoDetectionService.analysisFps).ceil()} frames (${VideoDemoDetectionService.analysisFps} FPS)'
+                            : 'Size: ${(_videoSizeKb / 1024).toStringAsFixed(1)} MB')
                         : 'Supports MP4, MOV, AVI formats',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
                   ),
@@ -336,6 +406,43 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
                         ],
                       ),
                       const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppTheme.primaryColor.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${_analyzedFramesCount ?? _videoTotalFrames ?? 0} Frames Analyzed',
+                              style: const TextStyle(
+                                color: AppTheme.primaryColor,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          if (_videoDurationSeconds != null) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '${_videoDurationSeconds!.toStringAsFixed(1)}s (2 FPS)',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 12),
                       const Divider(),
                       const SizedBox(height: 8),
 
@@ -353,11 +460,51 @@ class _VideoUploadScreenState extends State<VideoUploadScreen> {
                       ],
 
                       ..._detectedResults!.map((item) {
-                        return ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.play_circle_fill, color: AppTheme.primaryColor),
-                          title: Text('${item.label} at ${_formatSeconds(item.offsetSeconds)}'),
-                          subtitle: Text('Confidence score: ${(item.confidence * 100).toStringAsFixed(1)}%'),
+                        final durationStr = item.durationSeconds > 1.0
+                            ? ' (${item.durationSeconds.toStringAsFixed(1)}s)'
+                            : '';
+                        final isVape = item.classId == 0 || item.classId == 2;
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: ListTile(
+                            dense: true,
+                            leading: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: (isVape ? const Color(0xFF6C63FF) : const Color(0xFFFF5722)).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(
+                                isVape ? Icons.air_rounded : Icons.local_fire_department_rounded,
+                                color: isVape ? const Color(0xFF6C63FF) : const Color(0xFFFF5722),
+                                size: 18,
+                              ),
+                            ),
+                            title: Text(
+                              '${item.label}$durationStr',
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                            ),
+                            subtitle: Text('Timeline offset: ${_formatSeconds(item.offsetSeconds)}'),
+                            trailing: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${(item.confidence * 100).toStringAsFixed(0)}% conf',
+                                style: const TextStyle(
+                                  color: Colors.green,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
                         );
                       }),
                     ],
