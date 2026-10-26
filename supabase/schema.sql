@@ -11,8 +11,21 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ DEFAULT now(),
   daily_puff_goal INTEGER,
   baseline_puffs_per_day INTEGER,
-  years_smoked INTEGER
+  years_smoked INTEGER,
+  product_type TEXT,
+  preferred_strategy TEXT,
+  primary_trigger TEXT,
+  quit_strategy TEXT DEFAULT 'gradual_reduction',
+  plan_start_date TIMESTAMPTZ DEFAULT now(),
+  target_quit_date TIMESTAMPTZ,
+  weekly_reduction_rate FLOAT DEFAULT 10.0
 );
+
+-- Schema migration additions for existing databases
+ALTER TABLE users ADD COLUMN IF NOT EXISTS quit_strategy TEXT DEFAULT 'gradual_reduction';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_start_date TIMESTAMPTZ DEFAULT now();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS target_quit_date TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_reduction_rate FLOAT DEFAULT 10.0;
 
 -- Sessions table
 CREATE TABLE IF NOT EXISTS sessions (
@@ -96,10 +109,6 @@ CREATE POLICY "Users can insert own sessions" ON sessions
 DROP POLICY IF EXISTS "Users can update own sessions" ON sessions;
 CREATE POLICY "Users can update own sessions" ON sessions
   FOR UPDATE USING (auth.uid() = user_id);
-
-DROP POLICY IF EXISTS "Users can delete own sessions" ON sessions;
-CREATE POLICY "Users can delete own sessions" ON sessions
-  FOR DELETE USING (auth.uid() = user_id);
 
 -- RLS Policies for addiction_scores table
 DROP POLICY IF EXISTS "Users can view own addiction scores" ON addiction_scores;
