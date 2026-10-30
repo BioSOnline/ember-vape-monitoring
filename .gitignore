@@ -72,3 +72,4 @@ datasets/
 blobs/
 .vscode/
 training_progress.json
+.keras/
