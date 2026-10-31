@@ -6,11 +6,12 @@ import 'package:ember/models/addiction_score.dart';
 import 'package:ember/models/puff_event.dart';
 import 'package:ember/models/session.dart';
 import 'package:ember/models/user_profile.dart';
+import 'package:ember/models/quit_plan.dart';
 import 'package:ember/services/ml_service.dart';
 import 'package:ember/services/supabase_service.dart';
-import 'package:ember/widgets/manual_entry_dialog.dart';
+import 'package:ember/widgets/mindful_reminder_quotes_card.dart';
 import 'package:ember/widgets/theme_toggle_widget.dart';
-import 'package:ember/screens/detection_screen.dart';
+import 'package:ember/widgets/quit_plan_selector_sheet.dart';
 import 'package:ember/screens/profile_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -109,8 +110,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Color get _goalColor {
-    final goal = _profile?.dailyPuffGoal;
-    if (goal == null || goal == 0) return AppTheme.primaryColor;
+    final goal = _profile?.effectiveDailyGoal ?? _profile?.dailyPuffGoal;
+    if (goal == null || goal == 0) {
+      if (_profile?.quitPlan.strategyType == QuitStrategyType.coldTurkey && _todayCount > 0) {
+        return AppTheme.highRiskColor;
+      }
+      return AppTheme.primaryColor;
+    }
     final ratio = _todayCount / goal;
     if (ratio < 0.7) return AppTheme.lowRiskColor;
     if (ratio < 1.0) return AppTheme.moderateRiskColor;
@@ -120,20 +126,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int get _rangeTotal => _rangeEvents.length;
   double get _dailyAvg => _rangeTotal / _selectedTimeframeDays;
 
-  Future<void> _openManualEntry() async {
-    final updated = await ManualEntryDialog.show(context);
-    if (updated == true) {
-      _load();
-    }
-  }
-
-  Future<void> _startDetection() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const DetectionScreen()),
-    );
-    _load();
-  }
-
   Future<void> _openProfile() async {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const ProfileScreen()),
@@ -142,27 +134,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _showPuffHistorySheet() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (context) {
         return Container(
-          height: MediaQuery.of(context).size.height * 0.7,
-          padding: const EdgeInsets.all(20),
+          height: MediaQuery.of(context).size.height * 0.72,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Top drag grabber
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: isDark ? Colors.white24 : Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    'Logged Puff History',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Puff Log History',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                      Text(
+                        '${_rangeEvents.length} recorded events in past $_selectedTimeframeDays days',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: isDark ? Colors.white60 : Colors.grey[600],
+                            ),
+                      ),
+                    ],
                   ),
                   IconButton(
                     icon: const Icon(Icons.close),
@@ -170,27 +186,78 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               Expanded(
                 child: _rangeEvents.isEmpty
-                    ? const Center(child: Text('No puff logs recorded yet.'))
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.smoke_free_rounded, size: 48, color: Colors.grey[400]),
+                            const SizedBox(height: 12),
+                            Text(
+                              'No puff events recorded in this window.',
+                              style: TextStyle(color: Colors.grey[500], fontWeight: FontWeight.w500),
+                            ),
+                          ],
+                        ),
+                      )
                     : ListView.separated(
                         itemCount: _rangeEvents.length,
                         separatorBuilder: (context, index) => const Divider(height: 1),
                         itemBuilder: (context, index) {
                           final event = _rangeEvents[index];
                           final formattedTime = DateFormat('EEE, MMM d • h:mm:ss a').format(event.detectedAt);
+                          
+                          final isManual = event.inputMode == 'manual';
+                          final isVideo = event.inputMode == 'video';
+                          final modeColor = isManual
+                              ? const Color(0xFF8B5CF6)
+                              : isVideo
+                                  ? const Color(0xFF3B82F6)
+                                  : AppTheme.primaryColor;
+                          final modeIcon = isManual
+                              ? Icons.edit_note_rounded
+                              : isVideo
+                                  ? Icons.video_file_outlined
+                                  : Icons.camera_alt_rounded;
+
                           return ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: AppTheme.primaryColor.withValues(alpha: 0.1),
-                              child: Icon(
-                                event.inputMode == 'manual' ? Icons.touch_app : Icons.camera_alt,
-                                color: AppTheme.primaryColor,
-                                size: 18,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            leading: Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                color: modeColor.withValues(alpha: 0.12),
+                                shape: BoxShape.circle,
                               ),
+                              child: Icon(modeIcon, color: modeColor, size: 20),
                             ),
-                            title: Text(formattedTime, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                            subtitle: Text('Mode: ${event.inputMode}'),
+                            title: Text(
+                              formattedTime,
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                            ),
+                            subtitle: Row(
+                              children: [
+                                Container(
+                                  margin: const EdgeInsets.only(top: 2),
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: modeColor.withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    event.inputMode.toUpperCase(),
+                                    style: TextStyle(
+                                      color: modeColor,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 0.5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                             trailing: event.confidenceScore != null
                                 ? Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -200,7 +267,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     ),
                                     child: Text(
                                       '${(event.confidenceScore! * 100).toInt()}% conf',
-                                      style: const TextStyle(color: Colors.green, fontSize: 11, fontWeight: FontWeight.bold),
+                                      style: const TextStyle(
+                                        color: Colors.green,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                     ),
                                   )
                                 : null,
@@ -219,34 +290,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Dashboard'),
+        title: const FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text('Dashboard'),
+        ),
         actions: [
           const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4),
+            padding: EdgeInsets.symmetric(horizontal: 2),
             child: CuteThemeToggleWidget(),
           ),
           IconButton(
+            visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.account_circle_outlined),
             onPressed: _openProfile,
             tooltip: 'User Profile',
           ),
           IconButton(
+            visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.history_outlined),
             onPressed: _showPuffHistorySheet,
             tooltip: 'Puff Log History',
           ),
           IconButton(
+            visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.refresh),
             onPressed: _loading ? null : _load,
             tooltip: 'Refresh',
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openManualEntry,
-        backgroundColor: AppTheme.primaryColor,
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text('Log Puff', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -270,6 +342,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                         const SizedBox(height: 16),
 
+                        // Rotating Mindful Reminders & Quotes
+                        const MindfulReminderQuotesCard(),
+                        const SizedBox(height: 16),
+
                         _SummaryRow(
                           rangeTotal: _rangeTotal,
                           dailyAvg: _dailyAvg,
@@ -280,10 +356,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         
                         _DailyGoalCard(
                           todayCount: _todayCount,
-                          goal: _profile?.dailyPuffGoal,
+                          profile: _profile,
                           goalColor: _goalColor,
-                          onStartDetection: _startDetection,
-                          onManualLog: _openManualEntry,
+                          onCustomizePlan: () async {
+                            if (_profile != null) {
+                              final updated = await QuitPlanSelectorSheet.show(
+                                context,
+                                profile: _profile!,
+                                onPlanUpdated: (newProfile) {
+                                  setState(() => _profile = newProfile);
+                                },
+                              );
+                              if (updated != null) {
+                                _load();
+                              }
+                            }
+                          },
                         ),
                         const SizedBox(height: 16),
                         
@@ -438,49 +526,140 @@ class _StatChip extends StatelessWidget {
   }
 }
 
-// ─── Daily Goal Card ──────────────────────────────────────────────────────────
+// ─── Daily Goal & Quit Plan Card ─────────────────────────────────────────────
 
 class _DailyGoalCard extends StatelessWidget {
   final int todayCount;
-  final int? goal;
+  final UserProfile? profile;
   final Color goalColor;
-  final VoidCallback onStartDetection;
-  final VoidCallback onManualLog;
+  final VoidCallback? onCustomizePlan;
 
   const _DailyGoalCard({
     required this.todayCount,
-    required this.goal,
+    this.profile,
     required this.goalColor,
-    required this.onStartDetection,
-    required this.onManualLog,
+    this.onCustomizePlan,
   });
 
   @override
   Widget build(BuildContext context) {
-    final progress = goal != null && goal! > 0
-        ? (todayCount / goal!).clamp(0.0, 1.0)
-        : null;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final plan = profile?.quitPlan;
+    final effectiveGoal = profile?.effectiveDailyGoal ?? profile?.dailyPuffGoal;
+    final isColdTurkey = plan?.strategyType == QuitStrategyType.coldTurkey;
+    final isMonday = plan?.isMondayAdjustmentDay() ?? (DateTime.now().weekday == DateTime.monday);
+
+    final progress = effectiveGoal != null && effectiveGoal > 0
+        ? (todayCount / effectiveGoal).clamp(0.0, 1.0)
+        : (isColdTurkey ? (todayCount > 0 ? 1.0 : 0.0) : null);
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(18),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Top Plan Strategy Header
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primaryColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.track_changes, size: 13, color: AppTheme.primaryColor),
+                      const SizedBox(width: 5),
+                      Text(
+                        plan != null
+                            ? '${plan.strategyType.title} · Wk ${plan.currentWeekNumber()}'
+                            : 'Daily Target Goal',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: AppTheme.primaryColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                if (onCustomizePlan != null)
+                  InkWell(
+                    onTap: onCustomizePlan,
+                    borderRadius: BorderRadius.circular(8),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.tune, size: 13, color: AppTheme.primaryColor),
+                          SizedBox(width: 4),
+                          Text(
+                            'Edit Plan',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            // Monday Adjustment Alert Banner
+            if (isMonday && plan != null && plan.strategyType == QuitStrategyType.gradualReduction) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: AppTheme.lowRiskColor.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: AppTheme.lowRiskColor.withValues(alpha: 0.35),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.celebration, color: AppTheme.lowRiskColor, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Monday Step-Down Applied: Ceiling lowered to $effectiveGoal puffs this week. Keep strong!',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? Colors.white : Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             Row(
               children: [
                 SizedBox(
-                  width: 90,
-                  height: 90,
+                  width: 84,
+                  height: 84,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: 90,
-                        height: 90,
+                        width: 84,
+                        height: 84,
                         child: CircularProgressIndicator(
                           value: progress,
-                          strokeWidth: 8,
-                          backgroundColor: Colors.grey[200],
+                          strokeWidth: 7,
+                          backgroundColor: Colors.grey.withValues(alpha: 0.2),
                           color: goalColor,
                         ),
                       ),
@@ -492,6 +671,7 @@ class _DailyGoalCard extends StatelessWidget {
                             style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                                   fontWeight: FontWeight.bold,
                                   color: goalColor,
+                                  fontSize: 26,
                                   height: 1,
                                 ),
                           ),
@@ -499,6 +679,7 @@ class _DailyGoalCard extends StatelessWidget {
                             'puffs',
                             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                   color: Colors.grey[500],
+                                  fontSize: 10,
                                 ),
                           ),
                         ],
@@ -506,36 +687,39 @@ class _DailyGoalCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(width: 20),
+                const SizedBox(width: 18),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        "Today's Usage",
+                        isColdTurkey ? 'Cold Turkey Target: 0' : "Today's Ceiling",
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.bold,
+                              fontSize: 16,
                             ),
                       ),
-                      const SizedBox(height: 4),
-                      if (goal != null) ...[
+                      const SizedBox(height: 3),
+                      if (effectiveGoal != null && effectiveGoal > 0) ...[
                         Text(
-                          '$todayCount of $goal daily goal',
-                          style: Theme.of(context).textTheme.bodyMedium,
+                          '$todayCount of $effectiveGoal allowed puffs',
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                fontSize: 13,
+                              ),
                         ),
                         const SizedBox(height: 4),
                         Row(
                           children: [
                             Icon(
-                              todayCount < goal! ? Icons.trending_down : Icons.warning_amber_rounded,
+                              todayCount <= effectiveGoal ? Icons.trending_down : Icons.warning_amber_rounded,
                               size: 14,
                               color: goalColor,
                             ),
                             const SizedBox(width: 4),
                             Text(
-                              todayCount < goal!
-                                  ? '${goal! - todayCount} under goal'
-                                  : '${todayCount - goal!} over goal',
+                              todayCount <= effectiveGoal
+                                  ? '${effectiveGoal - todayCount} remaining today'
+                                  : '${todayCount - effectiveGoal} over ceiling',
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                     color: goalColor,
                                     fontWeight: FontWeight.w600,
@@ -543,14 +727,24 @@ class _DailyGoalCard extends StatelessWidget {
                             ),
                           ],
                         ),
+                      ] else if (isColdTurkey) ...[
+                        Text(
+                          todayCount == 0
+                              ? '100% Smoke-Free today! Amazing work.'
+                              : '$todayCount slip(s) logged. Use Craving Relief to recover.',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: todayCount == 0 ? AppTheme.lowRiskColor : AppTheme.highRiskColor,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
                       ] else ...[
                         Text(
                           '$todayCount puffs logged today',
                           style: Theme.of(context).textTheme.bodyMedium,
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 2),
                         Text(
-                          'No daily goal set',
+                          'No active quit plan',
                           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                 color: Colors.grey[500],
                               ),
@@ -561,32 +755,47 @@ class _DailyGoalCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            const Divider(),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: onStartDetection,
-                    icon: const Icon(Icons.camera_alt, size: 16),
-                    label: const Text('Live Detect'),
+
+            if (plan != null && !isColdTurkey) ...[
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 14, color: AppTheme.primaryColor),
+                      const SizedBox(width: 5),
+                      Text(
+                        'Min Session Gap: ${plan.calculateTargetIntervalMinutes()}m',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: isDark ? Colors.white70 : Colors.grey[700],
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: onManualLog,
-                    icon: const Icon(Icons.edit, size: 16),
-                    label: const Text('Manual Log'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primaryColor,
-                      foregroundColor: Colors.white,
-                    ),
+                  Row(
+                    children: [
+                      const Icon(Icons.event_repeat, size: 14, color: AppTheme.secondaryColor),
+                      const SizedBox(width: 5),
+                      Text(
+                        isMonday
+                            ? 'Adjusted today!'
+                            : 'Next step: Mon (${plan.daysUntilNextMonday()}d)',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: isDark ? Colors.white70 : Colors.grey[700],
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -740,6 +949,7 @@ class _WeeklyTrendCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final maxCount = dailyCounts.map((e) => e.value).fold(0, (a, b) => a > b ? a : b);
     final maxY = (maxCount + 2).toDouble().clamp(5.0, double.infinity);
 
@@ -809,9 +1019,14 @@ class _WeeklyTrendCard extends StatelessWidget {
                           touchTooltipData: BarTouchTooltipData(
                             getTooltipColor: (_) => AppTheme.primaryColor.withValues(alpha: 0.9),
                             getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              final dayIndex = group.x;
+                              final daysAgo = (timeframeDays - 1) - dayIndex;
+                              final date = DateTime.now().subtract(Duration(days: daysAgo));
+                              final dateStr = DateFormat('EEE, MMM d').format(date);
+                              final count = rod.toY.toInt();
                               return BarTooltipItem(
-                                '${rod.toY.toInt()}',
-                                const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                '$dateStr\n$count puff${count == 1 ? '' : 's'}',
+                                const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
                               );
                             },
                           ),
@@ -826,16 +1041,37 @@ class _WeeklyTrendCard extends StatelessWidget {
                               reservedSize: 28,
                               getTitlesWidget: (value, meta) {
                                 final dayIndex = value.toInt();
+                                if (dayIndex < 0 || dayIndex >= timeframeDays) {
+                                  return const SizedBox.shrink();
+                                }
+
                                 final daysAgo = (timeframeDays - 1) - dayIndex;
-                                final day = DateTime.now().subtract(Duration(days: daysAgo));
                                 final isToday = dayIndex == (timeframeDays - 1);
-                                
+
+                                // Avoid label clutter by spacing ticks evenly ending on today
+                                final bool showLabel;
+                                if (timeframeDays <= 7) {
+                                  showLabel = true;
+                                } else if (timeframeDays <= 14) {
+                                  // 14 days: show every 2 days (7 labels total)
+                                  showLabel = daysAgo % 2 == 0;
+                                } else {
+                                  // 30 days: show every 5 days (6 labels total)
+                                  showLabel = daysAgo % 5 == 0;
+                                }
+
+                                if (!showLabel) {
+                                  return const SizedBox.shrink();
+                                }
+
+                                final day = DateTime.now().subtract(Duration(days: daysAgo));
+
                                 return SideTitleWidget(
                                   axisSide: meta.axisSide,
                                   child: Text(
-                                    timeframeDays > 14
-                                        ? '${day.day}'
-                                        : DateFormat('E').format(day),
+                                    timeframeDays <= 7
+                                        ? DateFormat('E').format(day)
+                                        : '${day.day}',
                                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                           color: isToday ? AppTheme.primaryColor : Colors.grey[500],
                                           fontWeight: isToday ? FontWeight.bold : FontWeight.normal,
@@ -850,7 +1086,7 @@ class _WeeklyTrendCard extends StatelessWidget {
                         gridData: FlGridData(
                           drawVerticalLine: false,
                           getDrawingHorizontalLine: (value) => FlLine(
-                            color: Colors.grey[200]!,
+                            color: isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.06),
                             strokeWidth: 1,
                           ),
                         ),
@@ -862,7 +1098,9 @@ class _WeeklyTrendCard extends StatelessWidget {
                             barRods: [
                               BarChartRodData(
                                 toY: entry.value.toDouble(),
-                                width: timeframeDays > 14 ? 8 : 18,
+                                width: timeframeDays > 14
+                                    ? 6
+                                    : (timeframeDays > 7 ? 12 : 18),
                                 color: isToday
                                     ? AppTheme.primaryColor
                                     : AppTheme.primaryColor.withValues(alpha: 0.35),
