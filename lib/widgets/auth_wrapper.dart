@@ -1,19 +1,28 @@
 import 'package:flutter/material.dart';
+import 'package:ember/models/user_profile.dart';
 import 'package:ember/services/auth_service.dart';
 import 'package:ember/services/supabase_service.dart';
 import 'package:ember/screens/login_screen.dart';
 import 'package:ember/screens/onboarding_screen.dart';
 import 'package:ember/screens/home_screen.dart';
 
-class AuthWrapper extends StatelessWidget {
+class AuthWrapper extends StatefulWidget {
   const AuthWrapper({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final authService = AuthService();
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
 
+class _AuthWrapperState extends State<AuthWrapper> {
+  final _authService = AuthService();
+  final _supabaseService = SupabaseService();
+  Future<UserProfile?>? _profileFuture;
+  String? _lastCheckedUserId;
+
+  @override
+  Widget build(BuildContext context) {
     return StreamBuilder(
-      stream: authService.authStateChanges,
+      stream: _authService.authStateChanges,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -22,14 +31,21 @@ class AuthWrapper extends StatelessWidget {
         }
 
         final session = snapshot.hasData ? snapshot.data!.session : null;
-        final isAuthenticated = session?.user != null;
+        final user = session?.user;
 
-        if (!isAuthenticated) {
+        if (user == null) {
+          _lastCheckedUserId = null;
+          _profileFuture = null;
           return const LoginScreen();
         }
 
-        return FutureBuilder(
-          future: SupabaseService().getUserProfile(),
+        if (_lastCheckedUserId != user.id) {
+          _lastCheckedUserId = user.id;
+          _profileFuture = _supabaseService.getUserProfile();
+        }
+
+        return FutureBuilder<UserProfile?>(
+          future: _profileFuture,
           builder: (context, profileSnapshot) {
             if (profileSnapshot.connectionState == ConnectionState.waiting) {
               return const Scaffold(
@@ -38,7 +54,6 @@ class AuthWrapper extends StatelessWidget {
             }
 
             final profile = profileSnapshot.data;
-
             if (profile == null || !profile.hasCompletedOnboarding) {
               return const OnboardingScreen();
             }
