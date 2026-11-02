@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:provider/provider.dart';
@@ -20,13 +21,9 @@ void main() async {
     await SupabaseConfig.initialize();
     Logger.info('Supabase initialized');
 
-    await NotificationService().initialize();
-    Logger.info('Notification service initialized');
-
-    final tfliteInitialized = await PuffDetectionService().initialize();
-    if (!tfliteInitialized) {
-      Logger.warning('Puff detection service unavailable — model not yet integrated');
-    }
+    // Run non-critical background services asynchronously to achieve instant app launch
+    unawaited(NotificationService().initialize());
+    unawaited(PuffDetectionService().initialize());
 
     runApp(
       ChangeNotifierProvider(
