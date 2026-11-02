@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:ember/core/theme/app_theme.dart';
 import 'package:ember/core/constants/app_constants.dart';
+import 'package:ember/models/user_profile.dart';
+import 'package:ember/models/quit_plan.dart';
 import 'package:ember/services/supabase_service.dart';
 import 'package:ember/services/auth_service.dart';
 import 'package:ember/screens/dashboard_screen.dart';
@@ -22,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _supabaseService = SupabaseService();
   final _authService = AuthService();
   int _todayPuffCount = 0;
+  UserProfile? _profile;
   bool _loading = true;
 
   @override
@@ -33,8 +36,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadTodayStats() async {
     setState(() => _loading = true);
     final count = await _supabaseService.getTodayPuffCount();
+    final profile = await _supabaseService.getUserProfile();
     setState(() {
       _todayPuffCount = count;
+      _profile = profile;
       _loading = false;
     });
   }
@@ -73,50 +78,63 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(7),
               decoration: BoxDecoration(
                 gradient: AppTheme.primaryGradient,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.local_fire_department, color: Colors.white, size: 20),
+              child: const Icon(Icons.local_fire_department, color: Colors.white, size: 18),
             ),
-            const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  AppConstants.appName,
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.5,
-                      ),
-                ),
-                Text(
-                  'Behavioral Companion',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Colors.grey[500],
-                        fontSize: 11,
-                      ),
-                ),
-              ],
+            const SizedBox(width: 8),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    AppConstants.appName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.5,
+                          fontSize: 18,
+                        ),
+                  ),
+                  Text(
+                    'Behavioral Companion',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.grey[500],
+                          fontSize: 10,
+                        ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
         actions: [
           // Cute Animated Day/Night Toggle Widget
           const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4),
+            padding: EdgeInsets.symmetric(horizontal: 2),
             child: CuteThemeToggleWidget(),
           ),
           IconButton(
-            icon: const Icon(Icons.account_circle_outlined, size: 26),
+            icon: const Icon(Icons.account_circle_outlined, size: 24),
+            padding: const EdgeInsets.all(6),
+            constraints: const BoxConstraints(),
             tooltip: 'User Profile',
             onPressed: _openProfile,
           ),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert),
+            icon: const Icon(Icons.more_vert, size: 22),
+            padding: const EdgeInsets.all(6),
+            constraints: const BoxConstraints(),
             onSelected: (value) async {
               if (value == 'profile') {
                 _openProfile();
@@ -285,6 +303,92 @@ class _HomeScreenState extends State<HomeScreen> {
                                       fontWeight: FontWeight.w600,
                                     ),
                               ),
+                              if (_profile != null) ...[
+                                const SizedBox(height: 12),
+                                Builder(
+                                  builder: (context) {
+                                    final plan = _profile!.quitPlan;
+                                    final ceiling = _profile!.effectiveDailyGoal;
+                                    final isColdTurkey = plan.strategyType == QuitStrategyType.coldTurkey;
+                                    final isMonday = plan.isMondayAdjustmentDay();
+
+                                    return Column(
+                                      children: [
+                                        Wrap(
+                                          alignment: WrapAlignment.center,
+                                          spacing: 6,
+                                          runSpacing: 6,
+                                          children: [
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: (isColdTurkey && _todayPuffCount > 0
+                                                        ? AppTheme.highRiskColor
+                                                        : AppTheme.primaryColor)
+                                                    .withValues(alpha: 0.12),
+                                                borderRadius: BorderRadius.circular(12),
+                                              ),
+                                              child: Text(
+                                                isColdTurkey
+                                                    ? 'Target: 0 Puffs (Cold Turkey)'
+                                                    : 'Ceiling: $ceiling puffs · ${plan.strategyType.title}',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: isColdTurkey && _todayPuffCount > 0
+                                                      ? AppTheme.highRiskColor
+                                                      : AppTheme.primaryColor,
+                                                ),
+                                              ),
+                                            ),
+                                            if (isMonday && plan.strategyType == QuitStrategyType.gradualReduction) ...[
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                                decoration: BoxDecoration(
+                                                  color: AppTheme.lowRiskColor.withValues(alpha: 0.15),
+                                                  borderRadius: BorderRadius.circular(12),
+                                                ),
+                                                child: const Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    Icon(Icons.bolt, size: 12, color: AppTheme.lowRiskColor),
+                                                    SizedBox(width: 2),
+                                                    Text(
+                                                      'Monday Step-Down',
+                                                      style: TextStyle(
+                                                        fontSize: 10,
+                                                        fontWeight: FontWeight.bold,
+                                                        color: AppTheme.lowRiskColor,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                        if (ceiling > 0 && !isColdTurkey) ...[
+                                          const SizedBox(height: 8),
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(4),
+                                            child: SizedBox(
+                                              width: 180,
+                                              height: 6,
+                                              child: LinearProgressIndicator(
+                                                value: (_todayPuffCount / ceiling).clamp(0.0, 1.0),
+                                                backgroundColor: Colors.grey.withValues(alpha: 0.2),
+                                                color: _todayPuffCount <= ceiling
+                                                    ? AppTheme.lowRiskColor
+                                                    : AppTheme.highRiskColor,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    );
+                                  },
+                                ),
+                              ],
                             ],
                           ),
                   ],
