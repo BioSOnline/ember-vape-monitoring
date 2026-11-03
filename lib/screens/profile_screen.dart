@@ -4,6 +4,7 @@ import 'package:ember/models/user_profile.dart';
 import 'package:ember/services/auth_service.dart';
 import 'package:ember/services/supabase_service.dart';
 import 'package:ember/widgets/theme_toggle_widget.dart';
+import 'package:ember/widgets/quit_plan_selector_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -103,6 +104,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
         productType: _productType,
         preferredStrategy: _preferredStrategy,
         primaryTrigger: _primaryTrigger,
+        quitStrategy: _profile?.quitStrategy,
+        planStartDate: _profile?.planStartDate,
+        targetQuitDate: _profile?.targetQuitDate,
+        weeklyReductionRate: _profile?.weeklyReductionRate,
       );
 
       final success = await _supabaseService.upsertUserProfile(updatedProfile);
@@ -240,6 +245,104 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                     ),
                               ),
                             ],
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Active Quit Strategy & Plan Card
+                    Card(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        side: BorderSide(
+                          color: AppTheme.primaryColor.withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.primaryColor.withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: const Icon(Icons.track_changes, color: AppTheme.primaryColor, size: 20),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Quit Strategy & Tapering Plan',
+                                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                      ),
+                                      Text(
+                                        _profile?.quitPlan.strategyType.title ?? 'Gradual 10% Weekly Step-Down',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: AppTheme.primaryColor,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text('Daily Ceiling', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                                    Text(
+                                      '${_profile?.effectiveDailyGoal ?? _profile?.dailyPuffGoal ?? 20} puffs/day',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                  ],
+                                ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text('Target Session Gap', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                                    Text(
+                                      '${_profile?.targetIntervalMinutes ?? 45} mins',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                  ],
+                                ),
+                                OutlinedButton(
+                                  onPressed: () async {
+                                    if (_profile != null) {
+                                      final updated = await QuitPlanSelectorSheet.show(
+                                        context,
+                                        profile: _profile!,
+                                      );
+                                      if (updated != null && mounted) {
+                                        setState(() {
+                                          _profile = updated;
+                                          _dailyGoalController.text = updated.effectiveDailyGoal.toString();
+                                          _baselinePuffsController.text = updated.baselinePuffsPerDay?.toString() ?? '';
+                                        });
+                                      }
+                                    }
+                                  },
+                                  style: OutlinedButton.styleFrom(
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                  child: const Text('Change Plan'),
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                       ),
