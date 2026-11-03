@@ -4,6 +4,7 @@ import 'package:ember/core/theme/app_theme.dart';
 import 'package:ember/services/supabase_service.dart';
 import 'package:ember/services/auth_service.dart';
 import 'package:ember/models/user_profile.dart';
+import 'package:ember/models/quit_plan.dart';
 import 'package:ember/screens/home_screen.dart';
 import 'package:ember/widgets/theme_toggle_widget.dart';
 
@@ -22,6 +23,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final _supabaseService = SupabaseService();
   final _authService = AuthService();
 
+  QuitStrategyType _selectedStrategy = QuitStrategyType.gradualReduction;
   bool _isLoading = false;
   int _currentStep = 0;
 
@@ -42,14 +44,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       final userId = _authService.userId;
       if (userId == null) throw Exception('User not authenticated');
 
+      final baseline = int.parse(_baselinePuffsController.text);
       final profile = UserProfile(
         id: userId,
         createdAt: DateTime.now(),
-        baselinePuffsPerDay: int.parse(_baselinePuffsController.text),
+        baselinePuffsPerDay: baseline,
         yearsSmokedOrVaped: int.parse(_yearsSmokedController.text),
-        dailyPuffGoal: _dailyGoalController.text.isEmpty
-            ? null
-            : int.parse(_dailyGoalController.text),
+        dailyPuffGoal: _selectedStrategy == QuitStrategyType.coldTurkey
+            ? 0
+            : (_dailyGoalController.text.isNotEmpty
+                ? int.parse(_dailyGoalController.text)
+                : baseline),
+        quitStrategy: _selectedStrategy.code,
+        planStartDate: DateTime.now(),
+        weeklyReductionRate: 10.0,
       );
 
       final success = await _supabaseService.upsertUserProfile(profile);
@@ -292,35 +300,71 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         const SizedBox(height: 24),
 
         Text(
-          'Set Your Daily Goal',
+          'Choose Your Quit Strategy',
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
                 fontWeight: FontWeight.bold,
               ),
         ),
+        const SizedBox(height: 6),
+        Text(
+          'Select how EMBER adapts your daily limits over time',
+          style: TextStyle(color: Colors.grey[600], fontSize: 13),
+        ),
         const SizedBox(height: 16),
 
-        TextFormField(
-          controller: _dailyGoalController,
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: const InputDecoration(
-            labelText: 'Daily puff goal (optional)',
-            prefixIcon: Icon(Icons.track_changes),
-            helperText: 'Target number of puffs per day. Leave empty to skip.',
-          ),
-          validator: (value) {
-            if (value == null || value.isEmpty) return null;
-            final number = int.tryParse(value);
-            if (number == null || number < 0) {
-              return 'Please enter a valid number';
-            }
-            return null;
-          },
+        _buildStrategyOption(
+          type: QuitStrategyType.gradualReduction,
+          title: 'Gradual 10% Weekly Step-Down',
+          subtitle: 'Automatically lowers daily ceiling by 10% every Monday. Most sustainable method to avoid nicotine withdrawal shocks.',
+          badge: 'Recommended',
+          badgeColor: AppTheme.lowRiskColor,
+          icon: Icons.trending_down_rounded,
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 10),
+
+        _buildStrategyOption(
+          type: QuitStrategyType.coldTurkey,
+          title: 'Cold Turkey (Immediate Stop)',
+          subtitle: 'Aim for 0 puffs immediately. Unlocks high-intensity craving SOS and mindful breathing tools.',
+          badge: 'Intensive',
+          badgeColor: AppTheme.highRiskColor,
+          icon: Icons.ac_unit_rounded,
+        ),
+        const SizedBox(height: 10),
+
+        _buildStrategyOption(
+          type: QuitStrategyType.customGoal,
+          title: 'Custom Fixed Goal',
+          subtitle: 'Set a manual fixed ceiling of your choice.',
+          badge: 'Manual',
+          badgeColor: Colors.grey,
+          icon: Icons.tune_rounded,
+        ),
+
+        if (_selectedStrategy == QuitStrategyType.customGoal) ...[
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: _dailyGoalController,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(
+              labelText: 'Custom daily max puffs',
+              prefixIcon: Icon(Icons.track_changes),
+              border: OutlineInputBorder(),
+            ),
+            validator: (value) {
+              if (_selectedStrategy == QuitStrategyType.customGoal && (value == null || value.isEmpty)) {
+                return 'Please enter your custom goal';
+              }
+              return null;
+            },
+          ),
+        ],
+
+        const SizedBox(height: 20),
 
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: AppTheme.secondaryColor.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(16),
@@ -329,18 +373,97 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.lightbulb_outline, color: AppTheme.secondaryColor),
-              const SizedBox(width: 12),
+              const Icon(Icons.lightbulb_outline, color: AppTheme.secondaryColor, size: 20),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Tip: Start with a modest reduction goal. Small, consistent changes build sustainable long-term habits!',
-                  style: Theme.of(context).textTheme.bodyMedium,
+                  'Tip: You can modify your strategy and target dates anytime from your Profile or Dashboard.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35),
                 ),
               ),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildStrategyOption({
+    required QuitStrategyType type,
+    required String title,
+    required String subtitle,
+    required String badge,
+    required Color badgeColor,
+    required IconData icon,
+  }) {
+    final isSelected = _selectedStrategy == type;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return InkWell(
+      onTap: () => setState(() => _selectedStrategy = type),
+      borderRadius: BorderRadius.circular(14),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? AppTheme.primaryColor.withValues(alpha: isDark ? 0.15 : 0.08)
+              : (isDark ? Colors.white.withValues(alpha: 0.03) : Colors.grey[50]),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isSelected ? AppTheme.primaryColor : Colors.grey.withValues(alpha: 0.25),
+            width: isSelected ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: isSelected ? AppTheme.primaryColor : Colors.grey[600], size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: isSelected ? AppTheme.primaryColor : null,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: badgeColor.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          badge,
+                          style: TextStyle(color: badgeColor, fontSize: 9, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.grey[600],
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
