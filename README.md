@@ -4,7 +4,7 @@
 
 ---
 
-## 📌 Project Overview
+##  Project Overview
 
 **EMBER** is a mobile health (mHealth) and edge AI application developed as our final year engineering project. The goal of this project is to provide an automated, privacy-conscious way for users to track their smoking and vaping habits, understand their addiction triggers, and reduce nicotine consumption over time.
 
@@ -12,7 +12,7 @@ Most existing habit trackers require manual entry, which people often forget to 
 
 ---
 
-## 🎯 Key Objectives
+##  Key Objectives
 
 1. **Automated Puff Detection:** Detect hand-to-mouth vaping and smoking gestures in real time using edge computer vision without storing or streaming raw video.
 2. **Behavioral Analytics:** Group detected puffs into discrete sessions, measure inter-puff intervals, and identify peak smoking hours.
@@ -22,7 +22,7 @@ Most existing habit trackers require manual entry, which people often forget to 
 
 ---
 
-## 💡 How It Works (System Architecture)
+##  How It Works (System Architecture)
 
 The system is split into three main layers: on-device perception, behavioral analysis, and cloud persistence.
 
@@ -83,7 +83,7 @@ The system is split into three main layers: on-device perception, behavioral ana
 
 ---
 
-## 🔒 Privacy & Security Design
+##  Privacy & Security Design
 
 Because camera-based monitoring deals with sensitive personal data, EMBER is built with a strict **privacy-first approach**:
 - **No Video Recording or Uploading:** Camera frames are processed strictly in RAM and immediately discarded after inference.
@@ -92,13 +92,20 @@ Because camera-based monitoring deals with sensitive personal data, EMBER is bui
 
 ---
 
-## 🔬 Machine Learning Details
+##  Machine Learning Details
 
 ### 1. Computer Vision (Puff Detection)
-- **Model:** YOLOv9-tiny fine-tuned on custom vape and smoking gesture datasets.
-- **Quantization:** Exported to INT8 / Float32 TensorFlow Lite (`assets/models/puff_detection.tflite`) for mobile efficiency.
-- **Threading:** Image normalization and tensor packing are processed in background Dart `Isolate` threads to prevent UI frame drops.
-- **Training Results:** Achieved an **mAP50 of 83.47%** on the validation split.
+- **Model:** YOLOv9-tiny fine-tuned on custom vape and smoking gesture datasets (2 classes: `0 = Vape`, `1 = Cigarette`).
+- **Input/Output Specs:** Input `[1, 640, 640, 3]` Float32 (RGB normalized to [0, 1]). Output `[1, 6, 8400]` Float32 containing box centers `cx, cy, w, h` in 640-pixel coordinates, and raw class probabilities for Vape and Cigarette.
+- **Quantization & Format:** Exported to FP16/FP32 TensorFlow Lite (`assets/models/puff_detection.tflite`) for mobile execution via `tflite_flutter` (CPU / XNNPACK delegate).
+- **Threading:** Image pre-processing (letterbox with gray padding 114, YUV420-to-RGB BT.601 conversion) and inference are isolated in Dart `Isolate` threads to guarantee 60 FPS UI responsiveness.
+- **Validation Metrics:** Reported precision 88.5%, recall 82.1%, and mAP@50 89.7% at epoch 20.
+- **Gesture Filtering & Dwell State Machine:**
+  - Front camera horizontal flip compensation for mirrored previews.
+  - Spatial mouth proximity zone (`x: 0.20–0.80`, `y: 0.22–0.72`).
+  - Per-class non-maximum suppression (NMS) and target device filtering (`Vape`, `Cigarette`, or `Both`).
+  - Frame-rate adaptive dwell time (1.2s dwell with dynamic grace periods) to reliably trigger puff events across 1, 2, and 3 FPS capture modes.
+  - Live HUD debug overlay showing raw detection boxes, mouth zone boundaries, and isolate latency.
 
 ### 2. Behavioral Models
 - **Addiction Risk Assessment:** Decision Tree model evaluating 3 core metrics (Average daily puffs, Sessions per day, Average inter-puff interval in minutes).
@@ -106,7 +113,7 @@ Because camera-based monitoring deals with sensitive personal data, EMBER is bui
 
 ---
 
-## 💻 Tech Stack
+##  Tech Stack
 
 - **Mobile Framework:** Flutter 3.x (Dart 3.x)
 - **Edge ML Inference:** `tflite_flutter`, `camera`, `image`
@@ -117,7 +124,7 @@ Because camera-based monitoring deals with sensitive personal data, EMBER is bui
 
 ---
 
-## 📂 Codebase Structure
+##  Codebase Structure
 
 ```
 EMBER/
@@ -141,7 +148,7 @@ EMBER/
 
 ---
 
-## 🚀 Getting Started / Setup Guide
+##  Getting Started / Setup Guide
 
 ### 1. Prerequisites
 - [Flutter SDK](https://docs.flutter.dev/get-started/install) installed (v3.10.8 or newer)
@@ -166,32 +173,51 @@ flutter pub get
    SUPABASE_ANON_KEY=your-anon-public-key
    ```
 
-### 4. Running the App
+### 4. Running the App & Building
 ```bash
 # To run on a connected Android phone or emulator:
 flutter run
+
+# To build the debug APK:
+flutter build apk --debug
 
 # To run on Windows desktop:
 flutter run -d windows
 ```
 
----
-
-## 🛠️ Model Training & Export Workflow
-
-If you want to retrain or export the YOLOv9 detection model:
-
+### 5. Verification & Automated Tests
+The repository includes automated verification for inference, pipeline logic, and video analysis:
 ```bash
-# 1. Train YOLOv9 incrementally
-python train_yolov9.py --epochs 10
+# Run the full Flutter test suite (unit, model, ML, and video pipeline tests):
+flutter test
 
-# 2. Export best weights to TFLite
-python export.py --model runs/detect/train/weights/best.pt --target assets/models/puff_detection.tflite --int8
+# Run the standalone Python TFLite tensor & validation check:
+python scripts/verify_tflite.py
+
+# Check Dart codebase health:
+flutter analyze
 ```
 
 ---
 
-## 👥 Project Team & Acknowledgments
+##  Model Training & Export Workflow
+
+If you want to retrain or export the YOLOv9 detection model:
+
+```bash
+# 1. Train YOLOv9 on custom dataset
+python train_yolov9.py --epochs 20
+
+# 2. Export best weights to TFLite (FP16/FP32 recommended for mobile stability)
+python export.py --model runs/detect/train/weights/best.pt --target assets/models/puff_detection.tflite
+
+# 3. Verify the exported TFLite tensor dimensions and class mappings:
+python scripts/verify_tflite.py
+```
+
+---
+
+##  Project Team & Acknowledgments
 
 **Institution:** Mangalore Institute of Technology & Engineering (MITE), Moodabidri  
 **Department:** Computer Science & Engineering  
