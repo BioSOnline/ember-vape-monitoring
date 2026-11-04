@@ -9,16 +9,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:provider/provider.dart';
+import 'package:ember/core/theme/theme_provider.dart';
 import 'package:ember/main.dart';
 
 Future<void> setupSupabase() async {
   // Stub shared_preferences so Supabase's GoTrue storage works without a device
   SharedPreferences.setMockInitialValues({});
 
-  await Supabase.initialize(
-    url: 'https://placeholder.supabase.co',
-    anonKey: 'mock-supabase-anon-key-for-widget-testing',
-  );
+  try {
+    await Supabase.initialize(
+      url: 'https://placeholder.supabase.co',
+      anonKey: 'mock-supabase-anon-key-for-widget-testing',
+    );
+  } catch (_) {}
 }
 
 void main() {
@@ -28,7 +32,12 @@ void main() {
 
   group('EMBER App', () {
     testWidgets('App launches without crashing', (WidgetTester tester) async {
-      await tester.pumpWidget(const EmberApp());
+      await tester.pumpWidget(
+        ChangeNotifierProvider(
+          create: (_) => ThemeProvider(),
+          child: const EmberApp(),
+        ),
+      );
 
       // Allow a frame to settle (auth stream, etc.)
       await tester.pump(const Duration(milliseconds: 300));
@@ -39,7 +48,12 @@ void main() {
 
     testWidgets('Shows Scaffold on startup (loading or login)',
         (WidgetTester tester) async {
-      await tester.pumpWidget(const EmberApp());
+      await tester.pumpWidget(
+        ChangeNotifierProvider(
+          create: (_) => ThemeProvider(),
+          child: const EmberApp(),
+        ),
+      );
       await tester.pump();
 
       // Either a loading indicator or the login/onboarding Scaffold must appear.
